@@ -71,36 +71,8 @@ struct FSMC_cookie {
 
 struct NVDI_cookie {
     short version;  /* 0x0502 for version 5.02   */
-    short flags;    /* 9*reserved, alert, reserved, linea, mouse, gemdos, error, gdos */
     long  date;     /* 0x18061990 for 1990-06-18 */
-    /*
-     * NVDI 5 publishes function vectors well past the fields above, and
-     * programs reach them by fixed offset: +0xAC is scan_fonts(), +0xB0 is
-     * get_font_dir().  HighWire uses both to rescan the font folders without
-     * a reboot.  It gates on the version word first -- 0x0500 to 0x0599 --
-     * which "cookie nvdi = $0501" walks straight into, and then accepts any
-     * vector that is neither NULL nor odd.  With the structure ending at
-     * eight bytes those offsets were whatever happened to follow in memory,
-     * so about half of all garbage passed that check and got jsr'd in
-     * supervisor mode.
-     *
-     * Pad the structure out past the whole table instead.  It is a static, so
-     * the padding reads as zero, and a NULL vector is exactly what the
-     * caller's guard is looking for: it declines and carries on rather than
-     * jumping.  Implementing the vectors for real would be better still, and
-     * this is what has to be here first either way.
-     *
-     * The documented 5.03 table, so the padding covers all of it rather than
-     * only the two the font rescan needs:
-     *
-     *   +0xAC   scan_fonts(d0 count, d1 flags, a0 char **dirs)
-     *   +0xB0   get_font_dir(d0 index, a0 buf) -> WORD
-     *   +0xB8   get_cache_info
-     *   +0xDC   set_cache_config(d0)        version >= 0x0349
-     *   +0xE0   get_cache_config() -> d0    version >= 0x0349
-     *   +0x1AC  cache flush / refresh
-     */
-    char reserved[0x1b0 - 8];
+    short flags;    /* 9*reserved, alert, reserved, linea, mouse, gemdos, error, gdos */
 };
 
 static struct Readable_data {
