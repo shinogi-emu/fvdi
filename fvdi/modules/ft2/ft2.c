@@ -9,6 +9,7 @@
 
 #include "fvdi.h"
 #include "relocate.h"
+#include "os.h"         /* Fopen/Fread/Fclose and O_RDONLY, for the font-file cache */
 
 #include <ft2build.h>
 #include <freetype/config/ftconfig.h>
@@ -108,6 +109,7 @@ typedef struct {
 static FT_Error ft2_find_glyph(Virtual *vwk, Fontheader *font, short ch, int want);
 static Fontheader *ft2_dup_font(Virtual *vwk, Fontheader *src, short ptsize);
 static void ft2_dispose_font(Fontheader *font);
+static void ff_release(const char *name);
 
 #define USE_FREETYPE_ERRORS 1
 
@@ -209,6 +211,11 @@ static void ft2_close_face(Fontheader *font)
 
     FT_Done_Face((FT_Face) font->extra.unpacked.data);
     font->extra.unpacked.data = NULL;
+
+    /* The face is gone, so the buffer behind it is no longer pinned.  It is
+     * kept for reuse unless too many idle ones have accumulated -- closing
+     * and reopening a face must not re-read the file. */
+    ff_release(font->extra.filename);
 }
 
 
@@ -739,10 +746,200 @@ Fontheader *ft2_load_font(Virtual *vwk, const char *filename)
 }
 
 
+/*
+ * ===========================================================================
+ * Font files held in memory
+ * ===========================================================================
+ *
+ * FreeType reopens and recloses the font file on EVERY read -- one desktop
+ * repaint in an outline face cost 3787 opens -- and where drive C is a host
+ * folder reached a few kbyte at a time that is the difference between usable
+ * and not.
+ *
+ * The obvious fix, holding the file open for the life of the face, was tried
+ * and shipped and had to be reverted.  It cannot work here: GEMDOS handles
+ * are PER PROCESS and Fopen runs in the CALLER's context, but this cache is
+ * global to the VDI.  A handle opened while the desktop drew means nothing
+ * when a browser draws, and it cannot even be closed from the wrong context
+ * -- Fclose would shut an unrelated handle.  On top of that the hostfs link
+ * has one global table of 32 open files shared by every process, so holding
+ * handles starves the whole machine.  It did: the font selector reported
+ * "cannot open resource" and no application would start afterwards.
+ *
+ * So hold the FILE, not the handle.  Each font file is read once, in one
+ * sequential pass, and handed to FT_New_Memory_Face.  After that a face
+ * costs no file operations at all: no handle is held, the hostfs table is
+ * untouched, and the per-process problem cannot arise because there is
+ * nothing per-process left to get wrong.
+ *
+ * Entries are reference counted by pathname, because several faces (sizes
+ * and effects of the same font) share one file.  A buffer whose face is
+ * alive can never be freed -- FT_New_Memory_Face does not copy -- so the
+ * count is what keeps it, not the LRU.
+ *
+ * The worst case is therefore every font in the set resident at once, which
+ * for the shipped 48 TTFs is 15.7MB against the machine's 128MB.  That is
+ * the whole exposure, and it is why this is bounded where holding handles
+ * was not: memory is soft and plentiful, the hostfs table is hard and 32.
+ *
+ * Unreferenced buffers are kept for reuse up to FF_KEEP_MAX so that closing
+ * and reopening a face does not re-read the file; past that the least
+ * recently used are freed.
+ *
+ * This is NOT the `filecache` option that was reverted.  That one read whole
+ * files on a miss during boot-time registration, pulled 17M across the link
+ * before the desktop appeared and stalled the guest.  This reads only faces
+ * an application actually opens for rendering, on demand.  Registration
+ * still reads names straight from the file as it always did.
+ */
+
+#define FF_KEEP_MAX 8       /* unreferenced buffers kept for reuse */
+
+typedef struct fontfile
+{
+    struct fontfile *next;
+    char *name;
+    unsigned char *data;
+    unsigned long size;
+    long refs;
+    unsigned long stamp;
+} fontfile;
+
+static fontfile *fontfiles;
+static unsigned long ff_clock;
+
+/* Free the least recently used unreferenced buffers past FF_KEEP_MAX. */
+static void ff_trim(void)
+{
+    for (;;)
+    {
+        fontfile **pp, **victim = NULL;
+        unsigned long oldest = 0;
+        int idle = 0;
+
+        for (pp = &fontfiles; *pp; pp = &(*pp)->next)
+        {
+            if ((*pp)->refs)
+                continue;
+            idle++;
+            if (!victim || (*pp)->stamp < oldest)
+            {
+                oldest = (*pp)->stamp;
+                victim = pp;
+            }
+        }
+
+        if (idle <= FF_KEEP_MAX || !victim)
+            return;
+
+        {
+            fontfile *f = *victim;
+
+            *victim = f->next;
+            free(f->data);
+            free(f->name);
+            free(f);
+        }
+    }
+}
+
+static fontfile *ff_acquire(const char *name)
+{
+    fontfile *f;
+    long file, size;
+
+    for (f = fontfiles; f; f = f->next)
+    {
+        if (strcmp(f->name, name) == 0)
+        {
+            f->refs++;
+            f->stamp = ++ff_clock;
+            return f;
+        }
+    }
+
+    file = Fopen(name, O_RDONLY);
+    if (file < 0)
+        return NULL;
+
+    size = Fseek(0, file, SEEK_END);
+    Fseek(0, file, SEEK_SET);
+    if (size <= 0)
+    {
+        Fclose(file);
+        return NULL;
+    }
+
+    f = malloc(sizeof(fontfile));
+    if (!f)
+    {
+        Fclose(file);
+        return NULL;
+    }
+
+    f->data = malloc(size);
+    f->name = malloc(strlen(name) + 1);
+    if (!f->data || !f->name)
+    {
+        free(f->data);
+        free(f->name);
+        free(f);
+        Fclose(file);
+        return NULL;
+    }
+
+    /* One sequential pass.  This is the only time the file is read. */
+    if (Fread(file, size, f->data) != size)
+    {
+        Fclose(file);
+        free(f->data);
+        free(f->name);
+        free(f);
+        return NULL;
+    }
+    Fclose(file);
+
+    strcpy(f->name, name);
+    f->size = (unsigned long) size;
+    f->refs = 1;
+    f->stamp = ++ff_clock;
+    f->next = fontfiles;
+    fontfiles = f;
+
+    if (debug > 0)
+    {
+        PRINTF(("FT2 fontfile: read %s (%ld bytes)\n", name, size));
+    }
+
+    return f;
+}
+
+static void ff_release(const char *name)
+{
+    fontfile *f;
+
+    for (f = fontfiles; f; f = f->next)
+    {
+        if (strcmp(f->name, name) == 0)
+        {
+            if (f->refs > 0)
+                f->refs--;
+            if (!f->refs)
+            {
+                f->stamp = ++ff_clock;
+                ff_trim();
+            }
+            return;
+        }
+    }
+}
+
+
 static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
 {
     FT_Error error;
     FT_Face face;
+    fontfile *ff;
 
 #if 0
     if (font->extra.unpacked.data)
@@ -757,42 +954,21 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
 #endif
 
     /*
-     * DO NOT raise keep_open here.  It was tried and it broke the system.
-     *
-     * Holding the font file open for the life of the face is a large win --
-     * ft_ansi_stream_io() otherwise reopens and recloses on every read, so
-     * one desktop repaint in an outline face cost 3787 opens against 16 --
-     * but it cannot be done from this function, for two reasons.
-     *
-     * keep_open is a global latch and there is no matching lower here, so
-     * the first face turns it on for the rest of the session.  ft2_load_font
-     * gets away with raising it because it lowers it again on both exits.
-     *
-     * And the number held is NOT bounded by the cache.  The eviction below
-     * is a single `if`, frees at most one entry per call, and skips every
-     * entry a vwk still references -- then creates another one regardless.
-     * The accounting fix only made font_count honest; it never made it a
-     * limit.
-     *
-     * What that costs: the handles are drive C handles, and the hostfs link
-     * has ONE GLOBAL table of them for every process (MAX_FILES in
-     * tools/hostfsd/shinogi-hostfsd.c).  Filling it with font faces starves
-     * the whole system.  Reported symptoms were "cannot open resource (1)"
-     * from the Thing font selector and "The application X cannot be
-     * started!" for every application tried afterwards, permanently, since
-     * nothing ever released the handles.
-     *
-     * Reproduced deliberately by shrinking that table: the identical
-     * open_face error appears and the desktop never comes up.
-     *
-     * Doing this properly needs a bound on held handles that is independent
-     * of the face cache, and a way to release one that is still referenced.
+     * Never FT_New_Face here -- see the fontfile block above for why the
+     * file must be held in memory rather than left to FreeType to reopen
+     * on every read, and why holding the HANDLE instead had to be reverted.
      */
+    ff = ff_acquire(font->extra.filename);
+    if (!ff)
+    {
+        access->funcs.puts("FT2  open_face: cannot read font file\n");
+        return NULL;
+    }
 
-    /* Open the font and create ancillary data */
-    error = FT_New_Face(library, font->extra.filename, 0, &face);
+    error = FT_New_Memory_Face(library, ff->data, ff->size, 0, &face);
     if (error)
     {
+        ff_release(font->extra.filename);
         access->funcs.puts(ft2_error("FT2  open_face error: ", error));
         return NULL;
     }
@@ -808,15 +984,21 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
     {
         if (face->num_faces > font->extra.index)
         {
+            /* Same buffer, different face within it -- the reference taken
+             * above still covers it, so it is not acquired a second time. */
             FT_Done_Face(face);
-            error = FT_New_Face(library, font->extra.filename, font->extra.index, &face);
+            error = FT_New_Memory_Face(library, ff->data, ff->size,
+                                       font->extra.index, &face);
             if (error)
             {
+                ff_release(font->extra.filename);
                 access->funcs.puts(ft2_error("FT2  Couldn't get font face", error));
                 return NULL;
             }
         } else
         {
+            FT_Done_Face(face);
+            ff_release(font->extra.filename);
             access->funcs.puts(ft2_error("FT2  No such font face", error));
             return NULL;
         }
@@ -830,11 +1012,17 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
         memset(font->extra.scratch, 0, sizeof(c_glyph));
     }
 
-    font = ft2_load_metrics(vwk, font, face, ptsize);
-    if (!font)
     {
-        access->funcs.puts("FT2  Cannot load metrics\n");
-        return NULL;
+        Fontheader *loaded = ft2_load_metrics(vwk, font, face, ptsize);
+
+        if (!loaded)
+        {
+            FT_Done_Face(face);
+            ff_release(font->extra.filename);
+            access->funcs.puts("FT2  Cannot load metrics\n");
+            return NULL;
+        }
+        font = loaded;
     }
 
     /* Face loaded successfully */
