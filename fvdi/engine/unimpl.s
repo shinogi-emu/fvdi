@@ -28,10 +28,10 @@ transparent	equ	1		; Fall through?
 	xdef	v_contourfill
 	xdef	vqin_mode
 	xdef	v_cellarray,vq_cellarray
-	xdef	vst_name,vst_width
+	xdef	vst_width
 	xdef	v_getoutline,vst_scratch
 	xdef	vst_error,v_savecache
-	xdef	v_loadcache,v_flushcache,vst_setsize,vqt_cachesize
+	xdef	v_loadcache,v_flushcache,vqt_cachesize
 	xdef	vqt_get_table
 	xdef	v_set_app_buff
 	xdef	vq_tabstatus,v_hardcopy,v_rmcur,v_form_adv
@@ -96,7 +96,6 @@ vq_cellarray:
 v_kill_outline:
 	done_return
 	
-vst_name:
 vst_width:
 v_getoutline:
 vst_scratch:
@@ -105,7 +104,6 @@ vst_error:
 v_savecache:
 v_loadcache:
 v_flushcache:
-vst_setsize:
 vqt_cachesize:
 vqt_get_table:
 v_set_app_buff:
