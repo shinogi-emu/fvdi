@@ -92,8 +92,6 @@ void CDECL lib_vqt_fontinfo(Virtual *vwk, short *intout, short *ptsout);
 void CDECL lib_vqt_xfntinfo(Virtual *vwk, long flags, long id, long index, XFNT_INFO *info);
 void CDECL lib_vqt_fontheader(Virtual *vwk, VQT_FHDR *fhdr);
 int CDECL lib_vst_arbpt(Virtual *vwk, long height, short *charw, short *charh, short *cellw, short *cellh);
-long CDECL lib_vst_setsize32(Virtual *vwk, long point, short *charw, short *charh, short *cellw, short *cellh);
-long CDECL lib_vqt_name_and_id(Virtual *vwk, long format, const short *name_in, long count, short *name_out);
 void CDECL lib_vqt_attributes(Virtual * vwk, short *settings);
 unsigned short CDECL lib_vqt_char_index(Virtual *vwk, short *intin);
 short CDECL lib_vst_charmap(Virtual *vwk, long mode);

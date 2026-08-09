@@ -35,7 +35,6 @@ SUB1		equ	0		; Subtract 1 from text width? (NVDI apparently doesn't)
 
 	xdef	vqt_trackkern,vqt_pairkern,vst_kern,v_getbitmap_info
 	xdef	vqt_advance,vst_skew
-	xdef	vst_name,vst_setsize
 
 	xdef	vqt_char_index
 	xref	_lib_vqt_char_index
@@ -1165,110 +1164,6 @@ vst_load_fonts:
 * In:   a1      Parameter block
 *       a0      VDI struct
 vst_unload_fonts:
-	done_return
-
-
-
-* vst_name - Standard Trap function
-*
-* VDI 230 is two calls.  Sub-opcode 100 is NVDI's vqt_name_and_id, which
-* maps a font name to the ID vst_font() wants; anything else is vst_name,
-* which fVDI does not implement and which returns without touching
-* anything, as it did when this whole opcode was a stub in unimpl.s.
-*
-* In:   a1      Parameter block
-*       a0      VDI struct
-vst_name:
-	uses_d1
-	movem.l	d2/a1,-(a7)
-
-	move.l	control(a1),a2
-	cmp.w	#100,subfunction(a2)
-	bne	.not_name_and_id
-
-* lib_vqt_name_and_id(vwk, format, name_in, count, name_out)
-*
-* One character per intin word, starting at intin[1]; intin[0] is the
-* format.  The count is nintin-1 because the array carries no terminator.
-	move.l	intout(a1),-(a7)		; name_out (id goes in [0], name follows)
-	addq.l	#2,(a7)				; ...so the name starts at intout[1]
-	move.w	L_intin(a2),d0
-	ext.l	d0
-	subq.l	#1,d0
-	bpl	.count_ok
-	moveq	#0,d0
-.count_ok:
-	move.l	d0,-(a7)			; count
-	move.l	intin(a1),a2
-	pea	2(a2)				; name_in = &intin[1]
-	move.w	(a2),d0				; format = intin[0]
-	ext.l	d0
-	move.l	d0,-(a7)
-	move.l	a0,-(a7)
-	jsr	_lib_vqt_name_and_id
-	lea	20(a7),a7
-
-	movem.l	(a7)+,d2/a1
-	move.l	intout(a1),a2
-	move.w	d0,(a2)				; the font ID, 0 if unknown
-
-* Tell the caller how much of intout is ours.  gemlib reads the matched
-* name back using control[4]-1 as its length, so getting this wrong
-* truncates the name or runs off the end of the array.
-	move.l	control(a1),a2
-	move.w	#33,L_intout(a2)
-	used_d1
-	done_return
-
-.not_name_and_id:
-	movem.l	(a7)+,d2/a1
-	used_d1
-	done_return
-
-
-* vst_setsize - Standard Trap function
-*
-* VDI 252 is two calls, told apart by how many intin words arrived: one
-* word is vst_setsize (whole points), two are NVDI's vst_setsize32, whose
-* single long is the width in 1/65536 of a point.  Only the 32-bit form is
-* implemented -- it is the one applications use -- and the narrow form
-* returns untouched, as the whole opcode did when it was a stub.
-*
-* In:   a1      Parameter block
-*       a0      VDI struct
-vst_setsize:
-	uses_d1
-	movem.l	d2/a1,-(a7)
-
-	move.l	control(a1),a2
-	cmp.w	#2,L_intin(a2)
-	bne	.not_setsize32
-
-* lib_vst_setsize32(vwk, point, &charw, &charh, &cellw, &cellh)
-	move.l	ptsout(a1),a2
-	pea	6(a2)
-	pea	4(a2)
-	pea	2(a2)
-	pea	0(a2)
-	move.l	intin(a1),a2
-	move.l	(a2),-(a7)			; the 16.16 point size
-	move.l	a0,-(a7)
-	jsr	_lib_vst_setsize32
-	lea	24(a7),a7
-
-	movem.l	(a7)+,d2/a1
-	move.l	intout(a1),a2
-	move.l	d0,(a2)				; selected width, same units
-
-	move.l	control(a1),a2
-	move.w	#2,L_intout(a2)
-	move.w	#2,L_ptsout(a2)
-	used_d1
-	done_return
-
-.not_setsize32:
-	movem.l	(a7)+,d2/a1
-	used_d1
 	done_return
 
 	end
