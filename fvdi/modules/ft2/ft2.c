@@ -757,24 +757,37 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
 #endif
 
     /*
-     * Hold the file open for as long as the face lives.
+     * DO NOT raise keep_open here.  It was tried and it broke the system.
      *
-     * ft_ansi_stream_io() reopens and recloses the font file on every read
-     * unless keep_open is raised, and only ft2_load_font() -- the boot-time
-     * registration path -- ever raised it.  Faces created here are the ones
-     * glyph rendering uses, so the reopen landed on every character drawn:
-     * one Thing desktop repaint in an outline face cost 3787 file opens,
-     * and 16 with this.  Where drive C is a host folder reached a few kbyte
-     * at a time, that is the difference between usable and not.
+     * Holding the font file open for the life of the face is a large win --
+     * ft_ansi_stream_io() otherwise reopens and recloses on every read, so
+     * one desktop repaint in an outline face cost 3787 opens against 16 --
+     * but it cannot be done from this function, for two reasons.
      *
-     * This is only safe now that the size cache evicts correctly.  The
-     * handles come out of the CALLING application's process table, not
-     * fVDI's, because Fopen runs in the caller's context -- so the number
-     * held has to be bounded, and until the accounting fix above it was not
-     * bounded at any setting.  It is now the cache size, and the handles are
-     * released by FT_Done_Face -> ft_ansi_stream_close().
+     * keep_open is a global latch and there is no matching lower here, so
+     * the first face turns it on for the rest of the session.  ft2_load_font
+     * gets away with raising it because it lowers it again on both exits.
+     *
+     * And the number held is NOT bounded by the cache.  The eviction below
+     * is a single `if`, frees at most one entry per call, and skips every
+     * entry a vwk still references -- then creates another one regardless.
+     * The accounting fix only made font_count honest; it never made it a
+     * limit.
+     *
+     * What that costs: the handles are drive C handles, and the hostfs link
+     * has ONE GLOBAL table of them for every process (MAX_FILES in
+     * tools/hostfsd/shinogi-hostfsd.c).  Filling it with font faces starves
+     * the whole system.  Reported symptoms were "cannot open resource (1)"
+     * from the Thing font selector and "The application X cannot be
+     * started!" for every application tried afterwards, permanently, since
+     * nothing ever released the handles.
+     *
+     * Reproduced deliberately by shrinking that table: the identical
+     * open_face error appears and the desktop never comes up.
+     *
+     * Doing this properly needs a bound on held handles that is independent
+     * of the face cache, and a way to release one that is still referenced.
      */
-    ft_keep_open();
 
     /* Open the font and create ancillary data */
     error = FT_New_Face(library, font->extra.filename, 0, &face);
