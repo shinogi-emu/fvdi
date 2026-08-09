@@ -770,14 +770,7 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
      * The flag stays raised: it is read at stream-open and stream-read time,
      * and every face from here on wants the same treatment.  The handles are
      * released by FT_Done_Face -> ft_ansi_stream_close(), and their number is
-     * bounded by the size cache, so "fontcache n" also bounds them -- and it
-     * has to be a small number.  Fopen runs in the CALLING application's
-     * process context, so these handles come out of that program's table:
-     * holding 12 of them left Thing unable to open its own resource file,
-     * and holding 64 filled a console with "cannot open resource".  Three
-     * costs almost nothing (22 opens per desktop repaint against 16 with a
-     * cache of twelve, and 3787 with no fix at all) and leaves the table
-     * alone.
+     * bounded by the size cache, so "fontcache n" also bounds them.
      */
     ft_keep_open();
 
