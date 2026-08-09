@@ -114,7 +114,7 @@ short check_mem = 0;
 #endif
 short bconout = 0;
 short file_cache_size = 0;
-short font_cache_size = 12;
+short font_cache_size = 3;
 short antialiasing = 0;
 char *debug_file = 0;
 static short dummy_v;
