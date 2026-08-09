@@ -756,6 +756,26 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
     }
 #endif
 
+    /*
+     * Hold the file open for as long as the face lives.
+     *
+     * ft_ansi_stream_io() reopens and recloses the font file on every read
+     * unless keep_open is raised, and only ft2_load_font() -- the boot-time
+     * registration path -- ever raised it.  Faces created here are the ones
+     * glyph rendering uses, so the reopen landed on every character drawn:
+     * one Thing desktop repaint in an outline face cost 3787 file opens,
+     * and 16 with this.  Where drive C is a host folder reached a few kbyte
+     * at a time, that is the difference between usable and not.
+     *
+     * This is only safe now that the size cache evicts correctly.  The
+     * handles come out of the CALLING application's process table, not
+     * fVDI's, because Fopen runs in the caller's context -- so the number
+     * held has to be bounded, and until the accounting fix above it was not
+     * bounded at any setting.  It is now the cache size, and the handles are
+     * released by FT_Done_Face -> ft_ansi_stream_close().
+     */
+    ft_keep_open();
+
     /* Open the font and create ancillary data */
     error = FT_New_Face(library, font->extra.filename, 0, &face);
     if (error)
@@ -2329,8 +2349,21 @@ static Fontheader *ft2_find_fontsize(Virtual *vwk, Fontheader *font, short ptsiz
             listRemove((LINKABLE *) x);
             ft2_dispose_font(x->font); /* Remove the whole font */
             free(x);
+
+            /*
+             * Only now.  This used to sit outside the test and ran even when
+             * the walk above found nothing to free, so the counter fell while
+             * the list grew: the cap stopped matching reality, and after a few
+             * rounds of that the cache was effectively unbounded while
+             * appearing to be at its limit.  Nobody noticed while an entry
+             * cost only memory.  It stops being survivable the moment an entry
+             * also holds an open file handle.
+             */
+            font_count--;
+        } else if (debug > 0)
+        {
+            PRINTF(("FT2 find_font: nothing disposable, %d cached\n", (int) font_count));
         }
-        font_count--;
     }
 
     /* Create additional size/effects face */
