@@ -1263,6 +1263,20 @@ static long load_fonts(Virtual *vwk, const char **ptr)
         return 1;
     }
 
+    /*
+     * The config parser runs on the base workstation, but applications open
+     * theirs through the driver.  Fonts inserted here have to go into the
+     * driver's workstation or nothing but the ROM system font is ever visible
+     * to a program -- which is also the list ft2 checks for ID collisions.
+     * That means the driver line has to come first.
+     */
+    if (!driver_list)
+    {
+        error("Font directory specified before any driver was loaded!", NULL);
+        return 1;
+    }
+    vwk = ((Driver *) driver_list->value)->default_vwk;
+
     PRINTF(("Fonts: %s\n", fonts));
 
     /* Initialize FreeType2 module */
