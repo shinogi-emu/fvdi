@@ -114,6 +114,7 @@ short check_mem = 0;
 #endif
 short bconout = 0;
 short file_cache_size = 0;
+short font_cache_size = 12;
 short antialiasing = 0;
 char *debug_file = 0;
 static short dummy_v;
@@ -199,6 +200,7 @@ static Option const options[] = {
 #endif
     {"preallocate", { pre_allocate }, -1 }, /* preallocate n, allocate n kbyte at startup */
     {"filecache", { file_cache }, -1 },     /* filecache n, allocate n kbyte for FreeType2 font files */
+    {"fontcache", { &font_cache_size }, 4 },/* fontcache n, FreeType2 size/effect variants kept open */
     {"antialias", { &antialiasing }, 1 },   /* use FT2 antialiasing */
     {"debugfile", { set_debug_file }, -1 }, /* debugfile str, file to use for debug output */
     {"bconout", { &bconout }, 1 },          /* bconout, enables handling of BConout the the screen in fVDI */
