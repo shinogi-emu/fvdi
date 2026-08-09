@@ -106,7 +106,6 @@ extern short ext_malloc;
 extern short check_mem;
 #endif
 extern short file_cache_size;
-extern short font_cache_size;
 extern short antialiasing;
 extern char *debug_file;
 

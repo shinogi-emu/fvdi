@@ -756,24 +756,6 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
     }
 #endif
 
-    /* Hold the file open for as long as the face lives.
-     *
-     * Without this every stream read reopens and recloses the font file:
-     * ft_ansi_stream_io() consults the global keep_open flag, and only
-     * ft2_load_font() -- the boot-time registration path -- ever raised it.
-     * Faces created here are the ones glyph rendering actually uses, so the
-     * cost lands on every character drawn.  Painting one Thing desktop in an
-     * outline face opened LIBE_SAN\REGULAR.TTF 3455 times from 16 faces.
-     * On a drive C that is a host folder reached a few kbyte at a time, that
-     * is the difference between usable and not.
-     *
-     * The flag stays raised: it is read at stream-open and stream-read time,
-     * and every face from here on wants the same treatment.  The handles are
-     * released by FT_Done_Face -> ft_ansi_stream_close(), and their number is
-     * bounded by the size cache, so "fontcache n" also bounds them.
-     */
-    ft_keep_open();
-
     /* Open the font and create ancillary data */
     error = FT_New_Face(library, font->extra.filename, 0, &face);
     if (error)
@@ -2309,24 +2291,13 @@ static Fontheader *ft2_find_fontsize(Virtual *vwk, Fontheader *font, short ptsiz
         PRINTF(("FT2 find_font: fetch size=%d\n", ptsize));
     }
 
-    /* Every distinct (font, size, effects) combination is a separate entry
-     * here, and a miss costs a full FT_New_Face -- which reopens and
-     * reparses the file.  Ten of them is far too few for anything that mixes
-     * sizes: painting one Thing desktop in an outline face opened the font
-     * files 3787 times, and one HighWire page managed 11562.  Where the
-     * font lives on a host folder reached a few kbyte at a time, that is
-     * the difference between usable and not.
-     *
-     * The entries are allocated on demand, so a larger ceiling costs nothing
-     * until an application actually asks for that many combinations, and by
-     * then the alternative is thrashing.  "fontcache n" tunes it for
-     * machines where the memory matters more than the re-reads.
-     */
+    /* FIXME: handle maximum number of fonts in the cache here (configurable) */
+
     /* BUG! Cannot dispose any Fontheader structure when held by a vwk.
      *      Either all functions would update the current_font pointer when
      *      called or all currently used by vwks need to stay in mem.
      */
-    if (font_count > font_cache_size)
+    if (font_count > 10)
     {
         FontheaderListItem *x = (FontheaderListItem *)listLast(&fonts);
 
