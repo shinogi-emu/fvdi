@@ -69,10 +69,30 @@ struct FSMC_cookie {
     short quality;
 };	/* fsmc_cookie = {"_FSM", 0x0100, -1}; */
 
+/*
+ * Applications do not treat the NVDI cookie as a version stamp only - they
+ * take it as a pointer into NVDI's own private data and read it at fixed
+ * offsets.  NVDI 5.x keeps function vectors there, among them scan_fonts at
+ * +$AC and get_font_dir at +$B0.  Those offsets used to lie far beyond both
+ * this structure and its allocation, so an application checking for 5.x
+ * picked up whatever the allocator had left in the neighbouring heap; a
+ * non-NULL even value passed its sanity check and it jumped straight into
+ * fVDI's internals.  A browser died exactly that way, and since the value
+ * depends on the heap layout the damage was different on every boot.
+ *
+ * The reserved area moves those reads inside our own zeroed memory.  It is
+ * defensive padding against a private ABI fVDI does not implement and does
+ * not promise: a NULL vector is precisely what such callers must already
+ * check for, so they decline instead of crashing.  Do not remove or shrink
+ * it because nothing in fVDI reads it, and do not leave it uninitialized.
+ */
+#define NVDI_RESERVED	176	/* Covers at least offsets $00..$B3 of the published cookie */
+
 struct NVDI_cookie {
     short version;  /* 0x0502 for version 5.02   */
     long  date;     /* 0x18061990 for 1990-06-18 */
     short flags;    /* 9*reserved, alert, reserved, linea, mouse, gemdos, error, gdos */
+    char  reserved[NVDI_RESERVED];
 };
 
 static struct Readable_data {
@@ -180,9 +200,16 @@ long startup(void)
     }
     if (nvdi_cookie)
     {
+        long i;
+
         readable->nvdi_cookie.version = nvdi_cookie;
         readable->nvdi_cookie.date = 0x13052005L;
         readable->nvdi_cookie.flags = 0x0001;  /* GDOS support */
+        /* fmalloc() hands back uninitialized memory, so the padding must be cleared here */
+        for (i = 0; i < (long)sizeof(readable->nvdi_cookie.reserved); i++)
+        {
+            readable->nvdi_cookie.reserved[i] = 0;
+        }
     }
     if (calamus_cookie)
     {
