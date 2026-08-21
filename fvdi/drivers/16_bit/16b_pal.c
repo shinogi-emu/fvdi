@@ -88,30 +88,41 @@ void CDECL c_set_colours(Virtual *vwk, long start, long entries, unsigned short 
 {
     unsigned short colour;
     unsigned short component;
+    unsigned short raw;
     unsigned long tc_word;
     int i;
     short *realp;
 
     (void) vwk;
+    /*
+     * New style entries carry a full 16-bit component.  The eight bit
+     * value below is for the VDI and hardware fields, which are held to
+     * that width; the pixel value has to be packed from the ORIGINAL
+     * component, because shifting an already narrowed value down by
+     * 16 - red_bits discards all of it and leaves every pen black.
+     */
     if ((long)requested & 1) {          /* New entries? */
         requested = (unsigned short *)((long)requested & 0xfffffffeL);
         for(i = 0; i < entries; i++) {
             requested++;                /* First word is reserved */
-            component = *requested++ >> 8;
+            raw = *requested++;
+            component = raw >> 8;
             palette[start + i].vdi.red = (component * 1000L) / 255;
             palette[start + i].hw.red = component;  /* Not at all correct */
-            colour = component >> (16 - red_bits);  /* (component + (1 << (14 - red_bits))) */
+            colour = raw >> (16 - red_bits);        /* (raw + (1 << (14 - red_bits))) */
             tc_word = colour << green_bits;
-            component = *requested++ >> 8;
+            raw = *requested++;
+            component = raw >> 8;
             palette[start + i].vdi.green = (component * 1000L) / 255;
             palette[start + i].hw.green = component;    /* Not at all correct */
-            colour = component >> (16 - green_bits);    /* (component + (1 << (14 - green_bits))) */
+            colour = raw >> (16 - green_bits);          /* (raw + (1 << (14 - green_bits))) */
             tc_word |= colour;
             tc_word <<= blue_bits;
-            component = *requested++ >> 8;
+            raw = *requested++;
+            component = raw >> 8;
             palette[start + i].vdi.blue = (component * 1000L) / 255;
             palette[start + i].hw.blue = component; /* Not at all correct */
-            colour = component >> (16 - blue_bits);     /* (component + (1 << (14 - blue_bits))) */
+            colour = raw >> (16 - blue_bits);       /* (raw + (1 << (14 - blue_bits))) */
             tc_word |= colour;
 #if NOVA
             tc_word = ((tc_word & 0x000000ff) << 24) | ((tc_word & 0x0000ff00) <<  8) |
