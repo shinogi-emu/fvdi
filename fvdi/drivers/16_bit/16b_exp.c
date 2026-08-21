@@ -439,8 +439,14 @@ long CDECL c_expand_area(Virtual *vwk, MFDB *src, long src_x, long src_y, MFDB *
      * count above one is refused, because a single-plane form is identical
      * in standard and device format, and a source that works today keeps
      * working.
+     *
+     * A missing source is refused for the same reason rather than
+     * dereferenced: the destination MFDB is already allowed to be NULL a
+     * few lines below, where it means the screen, so a NULL form is a
+     * shape this interface really can be handed.  There is nothing for an
+     * expansion to read from in that case.
      */
-    if (src && (src->bitplanes > 1))
+    if (!src || !src->address || src->bitplanes > 1)
         return 0;               /* Not handled - let the engine fall back */
 
     wk = vwk->real_address;
