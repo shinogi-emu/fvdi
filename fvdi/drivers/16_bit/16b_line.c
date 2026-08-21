@@ -706,6 +706,145 @@ static void line_revtransp_p(PIXEL *addr, PIXEL *addr_fast, long pattern, int co
 #define BOTH
 #endif
 
+/*
+ * Axis aligned solid runs.
+ *
+ * The horizontal helper deliberately mirrors solid_run() in 16b_fill.c:
+ * an odd leading pixel is written first so that every store after it is
+ * long aligned, then the pixels are written in pairs as longs, unrolled
+ * eight deep. Vertical runs are strided and cannot be paired, so they
+ * only get the loop overhead cut by unrolling four deep.
+ */
+static void line_solid_run(PIXEL *d, int n, PIXEL colour)
+{
+    unsigned long pair;
+    unsigned long *q;
+    int pairs;
+
+    if (n <= 0)
+        return;
+
+    if ((long)d & 2) {
+        *d++ = colour;
+        if (--n == 0)
+            return;
+    }
+
+    pair = ((unsigned long)(unsigned short)colour << 16) |
+            (unsigned short)colour;
+    q = (unsigned long *)d;
+
+    for (pairs = n >> 1; pairs >= 8; pairs -= 8) {
+        q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
+        q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
+        q += 8;
+    }
+    while (pairs-- > 0)
+        *q++ = pair;
+
+    if (n & 1)
+        *(PIXEL *)q = colour;
+}
+
+static void line_solid_col(PIXEL *d, int n, int step, PIXEL colour)
+{
+    for (; n >= 4; n -= 4) {
+        *d = colour; d += step;
+        *d = colour; d += step;
+        *d = colour; d += step;
+        *d = colour; d += step;
+    }
+    while (n-- > 0) {
+        *d = colour;
+        d += step;
+    }
+}
+
+/*
+ * XOR (mode 3) complements what is already there and ignores the colour,
+ * exactly as line_xor() does. Complementing a long complements both of
+ * the pixels it holds, so the horizontal run can still be paired.
+ */
+static void line_xor_run(PIXEL *d, int n)
+{
+    unsigned long *q;
+    int pairs;
+
+    if (n <= 0)
+        return;
+
+    if ((long)d & 2) {
+        *d = ~*d;
+        d++;
+        if (--n == 0)
+            return;
+    }
+
+    q = (unsigned long *)d;
+
+    for (pairs = n >> 1; pairs >= 8; pairs -= 8) {
+        q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
+        q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
+        q += 8;
+    }
+    while (pairs-- > 0) {
+        *q = ~*q;
+        q++;
+    }
+
+    if (n & 1) {
+        d = (PIXEL *)q;
+        *d = ~*d;
+    }
+}
+
+static void line_xor_col(PIXEL *d, int n, int step)
+{
+    for (; n >= 4; n -= 4) {
+        *d = ~*d; d += step;
+        *d = ~*d; d += step;
+        *d = ~*d; d += step;
+        *d = ~*d; d += step;
+    }
+    while (n-- > 0) {
+        *d = ~*d;
+        d += step;
+    }
+}
+
+#ifdef BOTH
+/*
+ * With a shadow buffer the XOR source is the shadow, not the screen
+ * (see s_line_xor()), so the two buffers cannot be complemented
+ * independently. Keep it a plain pixel loop rather than assume the two
+ * buffers share the same long alignment.
+ */
+static void line_xor_run_both(PIXEL *d, PIXEL *d_fast, int n)
+{
+    int v;
+
+    while (n-- > 0) {
+        v = ~*d_fast;
+        *d_fast++ = v;
+        *d++ = v;
+    }
+}
+
+static void line_xor_col_both(PIXEL *d, PIXEL *d_fast, int n, int step)
+{
+    int v;
+
+    while (n-- > 0) {
+        v = ~*d_fast;
+        *d_fast = v;
+        *d = v;
+        d_fast += step;
+        d += step;
+    }
+}
+#endif
+
+
 long CDECL c_line_draw(Virtual *vwk, long x1, long y1, long x2, long y2,
                        long pattern, long colour, long mode)
 {
@@ -719,6 +858,7 @@ long CDECL c_line_draw(Virtual *vwk, long x1, long y1, long x2, long y2,
     int one_step, both_step;
     int d, count;
     int incrE, incrNE;
+    int run_step;
 
     if ((long)vwk & 1) {
         return -1;          /* Don't know about anything yet */
@@ -735,6 +875,95 @@ long CDECL c_line_draw(Virtual *vwk, long x1, long y1, long x2, long y2,
     addr = wk->screen.mfdb.address;
     line_add = wk->screen.wrap >> 1;
 
+    /*
+     * Axis aligned solid lines are the bulk of what GEM draws - box
+     * borders, window frames, separators, underlines and table rules all
+     * reach the driver as single horizontal or vertical segments, and the
+     * Bresenham loop below walks them one pixel at a time. They are plain
+     * runs of pixels, so deal with them here instead.
+     * Only solid lines qualify: a patterned line still needs the mask
+     * stepping of the *_p routines and falls through to the general code.
+     * Modes 1, 2 and 4 are character for character the same function for a
+     * solid line (they all store the foreground unconditionally), so one
+     * solid run serves all three; only mode 3 needs its own.
+     */
+    if ((pattern & 0xffff) == 0xffff && (y1 == y2 || x1 == x2)) {
+        if (y1 == y2) {
+            /*
+             * The Bresenham loop stores the start pixel and then steps
+             * dx more times, so the run covers dx + 1 pixels and includes
+             * both endpoints. A one pixel line arrives here with count 1.
+             * The endpoints may be in either order (clip_line can swap
+             * them), so start from the left one.
+             */
+            count = (int)(x2 - x1);
+            if (count < 0) {
+                count = -count;
+                x1 = x2;
+            }
+            run_step = 1;
+        } else {
+            count = (int)(y2 - y1);
+            if (count < 0) {
+                count = -count;
+                y1 = y2;
+            }
+            run_step = line_add;
+        }
+        count++;
+
+        /*
+         * run_step tells the two apart below: line_add is the screen
+         * width in pixels, so it can never be 1.
+         */
+
+        pos = (short)y1 * (long)wk->screen.wrap + x1 * 2;
+        addr += pos >> 1;
+
+#ifdef BOTH
+        if ((addr_fast = wk->screen.shadow.address) != 0) {
+            addr_fast += pos >> 1;
+            switch (mode) {
+            case 1:             /* Replace */
+            case 2:             /* Transparent */
+            case 4:             /* Reverse transparent */
+                if (run_step == 1) {
+                    line_solid_run(addr_fast, count, foreground);
+                    line_solid_run(addr, count, foreground);
+                } else {
+                    line_solid_col(addr_fast, count, run_step, foreground);
+                    line_solid_col(addr, count, run_step, foreground);
+                }
+                break;
+            case 3:             /* XOR */
+                if (run_step == 1)
+                    line_xor_run_both(addr, addr_fast, count);
+                else
+                    line_xor_col_both(addr, addr_fast, count, run_step);
+                break;
+            }
+        } else
+#endif
+        {
+            switch (mode) {
+            case 1:             /* Replace */
+            case 2:             /* Transparent */
+            case 4:             /* Reverse transparent */
+                if (run_step == 1)
+                    line_solid_run(addr, count, foreground);
+                else
+                    line_solid_col(addr, count, run_step, foreground);
+                break;
+            case 3:             /* XOR */
+                if (run_step == 1)
+                    line_xor_run(addr, count);
+                else
+                    line_xor_col(addr, count, run_step);
+                break;
+            }
+        }
+        return 1;       /* Return as completed */
+    }
 
     x_step = 1;
     y_step = line_add;
