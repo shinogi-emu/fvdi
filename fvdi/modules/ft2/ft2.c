@@ -20,6 +20,7 @@
 #include FT_STROKER_H
 #include FT_SFNT_NAMES_H
 #include FT_TRUETYPE_IDS_H
+#include FT_TRUETYPE_TABLES_H	/* TT_OS2, FT_Get_Sfnt_Table */
 #else
 #include <freetype/freetype.h>
 #include <freetype/ftglyph.h>
@@ -27,6 +28,7 @@
 #include <freetype/ftstroke.h>	/* FT_Stroker, ... */
 #include <freetype/ftsnames.h>
 #include <freetype/ttnameid.h>
+#include <freetype/tttables.h>	/* TT_OS2, FT_Get_Sfnt_Table */
 #endif
 
 /* Appeared in FreeType 2.6.x */
@@ -106,7 +108,7 @@ typedef struct {
 } FontheaderListItem;
 
 
-static FT_Error ft2_find_glyph(Virtual *vwk, Fontheader *font, short ch, int want);
+static FT_Error ft2_find_glyph(Virtual *vwk, Fontheader *font, unsigned short ch, int want);
 static Fontheader *ft2_dup_font(Virtual *vwk, Fontheader *src, short ptsize);
 static void ft2_dispose_font(Fontheader *font);
 static void ff_release(const char *name);
@@ -1196,6 +1198,92 @@ void ft2_fontheader(Virtual *vwk, Fontheader *font, VQT_FHDR *fhdr)
 }
 
 
+/*
+ * Classify a face from the tables FreeType has already parsed.
+ *
+ * The OS/2 family class is the authoritative answer where it exists:
+ * its high byte is the IBM font class, 1-7 being the serif families,
+ * 8 sans serif, 9 ornamental, 10 script and 12 symbolic.  Class 6 is
+ * reserved and 0 means the font declined to say, so both fall through.
+ *
+ * PANOSE is the fallback, because plenty of faces leave sFamilyClass at
+ * zero but fill PANOSE in.  Its first byte is the family kind and, for
+ * Latin text, the second is the serif style: 2-10 are the serif shapes
+ * and 11-15 the sans ones.
+ *
+ * Neither is a measurement, so both can be wrong if the font lies about
+ * itself.  That is why the raw bytes go back to the caller as well as
+ * the cooked answer.
+ */
+static short ft2_classify(const TT_OS2 *os2)
+{
+    switch ((os2->sFamilyClass >> 8) & 0xff)
+    {
+    case 1: case 2: case 3: case 4: case 5: case 7:
+        return FVDI_FCLASS_SERIF;
+    case 8:
+        return FVDI_FCLASS_SANS;
+    case 9:
+        return FVDI_FCLASS_DECORATIVE;
+    case 10:
+        return FVDI_FCLASS_SCRIPT;
+    case 12:
+        return FVDI_FCLASS_SYMBOL;
+    default:
+        break;
+    }
+
+    switch (os2->panose[0])
+    {
+    case 2:     /* Latin text */
+        if (os2->panose[1] >= 2 && os2->panose[1] <= 10)
+            return FVDI_FCLASS_SERIF;
+        if (os2->panose[1] >= 11 && os2->panose[1] <= 15)
+            return FVDI_FCLASS_SANS;
+        break;
+    case 3:     /* Latin hand written */
+        return FVDI_FCLASS_SCRIPT;
+    case 4:     /* Latin decorative */
+        return FVDI_FCLASS_DECORATIVE;
+    case 5:     /* Latin symbol */
+        return FVDI_FCLASS_SYMBOL;
+    default:
+        break;
+    }
+
+    return FVDI_FCLASS_UNKNOWN;
+}
+
+
+
+/*
+ * FVDI_ALLOC_TRAP - diagnostic build only.
+ *
+ * MFDB width/height/wdwidth are all `short`, and the code below assigns
+ * 32-bit values into them.  An oversized text run therefore truncates to
+ * a NEGATIVE short, the word count follows it down, and the allocation
+ * size goes negative - which fmalloc reports as Mxalloc(-552864) with no
+ * clue as to which computation produced it.  This prints the operands.
+ *
+ * Everything is shown signed AND in hex, because a wrapped value read as
+ * plain positive decimal is exactly what one stares straight past.
+ */
+#ifdef FVDI_ALLOC_TRAP
+static void ft2_size_trap(const char *site, long a, long b, long c, long size)
+{
+    char buf[160];
+    sprintf(buf, "FT2  BAD SIZE %s: a=%ld($%lx) b=%ld($%lx) c=%ld($%lx) -> %ld($%lx)\n",
+            site, a, a, b, b, c, c, size, size);
+    access->funcs.puts(buf);
+}
+#define FT2_SIZE_CHECK(site, a, b, c, size) \
+    do { if ((long)(size) <= 0) \
+             ft2_size_trap((site), (long)(a), (long)(b), (long)(c), (long)(size)); \
+    } while (0)
+#else
+#define FT2_SIZE_CHECK(site, a, b, c, size) do { } while (0)
+#endif
+
 void ft2_xfntinfo(Virtual *vwk, Fontheader *font, long flags, XFNT_INFO *info)
 {
     int i;
@@ -1245,10 +1333,41 @@ void ft2_xfntinfo(Virtual *vwk, Fontheader *font, long flags, XFNT_INFO *info)
             info->pt_sizes[i] = sizes[i];
         info->pt_cnt = i;
     }
+
+    if (flags & XFNT_INFO_CLASS)
+    {
+        TT_OS2 *os2;
+
+        info->font_class = FVDI_FCLASS_UNKNOWN;
+        info->font_flags = FVDI_FFLAG_VALID;
+        info->family_class = 0;
+        for (i = 0; i < 10; i++)
+            info->panose[i] = 0;
+
+        if (face)
+        {
+            /* Measured by FreeType from the face itself rather than read
+             * out of a table, so it is right for the non-sfnt formats
+             * too. */
+            if (FT_IS_FIXED_WIDTH(face))
+                info->font_flags |= FVDI_FFLAG_MONOSPACED;
+
+            os2 = (TT_OS2 *) FT_Get_Sfnt_Table(face, FT_SFNT_OS2);
+            /* FreeType reports a missing OS/2 table as version 0xffff
+             * rather than a NULL pointer. */
+            if (os2 && os2->version != 0xffff)
+            {
+                info->family_class = os2->sFamilyClass;
+                for (i = 0; i < 10; i++)
+                    info->panose[i] = os2->panose[i];
+                info->font_class = ft2_classify(os2);
+            }
+        }
+    }
 }
 
 
-static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, short ch, c_glyph *cached, int want)
+static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, unsigned short ch, c_glyph *cached, int want)
 {
     short bitmap_italics_shear;
     FT_Face face;
@@ -1515,6 +1634,8 @@ static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, short ch, c_glyph
 
         if (src->rows != 0)
         {
+            FT2_SIZE_CHECK("glyph pitch*rows", dst->pitch, dst->rows, dst->width,
+                           (long)dst->pitch * dst->rows);
             dst->buffer = malloc(dst->pitch * dst->rows);
             if (!dst->buffer)
             {
@@ -1781,7 +1902,7 @@ static void ft2_dispose_font(Fontheader *font)
 }
 
 
-static FT_Error ft2_find_glyph(Virtual *vwk, Fontheader *font, short ch, int want)
+static FT_Error ft2_find_glyph(Virtual *vwk, Fontheader *font, unsigned short ch, int want)
 {
     int retval = 0;
 
@@ -1790,7 +1911,7 @@ static FT_Error ft2_find_glyph(Virtual *vwk, Fontheader *font, short ch, int wan
         font->extra.current = &((c_glyph *) font->extra.cache)[ch];
     } else
     {
-        if (((c_glyph *) font->extra.scratch)->cached != ch)
+        if ((unsigned short)((c_glyph *) font->extra.scratch)->cached != ch)
         {
             ft2_flush_glyph(font->extra.scratch);
         }
@@ -2000,7 +2121,7 @@ static MFDB *ft2_text_render_antialias(Virtual *vwk, Fontheader *font, short x, 
     end = text + slen;
     for (ch = text; ch < end; ++ch)
     {
-        short c = *ch;
+        unsigned short c = (unsigned short)*ch;   /* unsigned: see the note above */
 
         error = ft2_find_glyph(vwk, font, c, CACHED_METRICS | CACHED_PIXMAP);
         if (error)
@@ -2076,6 +2197,8 @@ static MFDB *ft2_text_render_antialias(Virtual *vwk, Fontheader *font, short x, 
         tb.width = xstart;
         tb.height = font->underline;
         tb.wdwidth = (tb.width + 1) >> 1; /* Words per line */
+        FT2_SIZE_CHECK("underline wdwidth*2*height", tb.wdwidth, tb.height, xstart,
+                       (long)tb.wdwidth * 2 * tb.height);
         tb.address = malloc(tb.wdwidth * 2 * tb.height);
         memset(tb.address, (font->extra.effects & 0x2) ? 0xff / 3 : 0xff, tb.wdwidth * 2 * tb.height);
 
@@ -2132,7 +2255,30 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
         end = text + slen;
         for (ch = text; ch < end; ++ch)
         {
-            short c = *ch;
+            /* UNSIGNED.  A signed short makes every codepoint >= 0x8000
+             * negative, and a negative value still satisfies "< 256",
+             * so the cache is indexed BEFORE its base - reading, and
+             * sometimes writing, arbitrary memory. */
+            unsigned short c = (unsigned short)*ch;
+
+#ifdef FVDI_HIGHCODE_REPORT
+            /* Report the codepoints that used to go negative, so one run
+             * says both "were any present?" and "is the fault gone?".
+             * Without this, a run that simply does not fault cannot
+             * distinguish a fix from a page that never triggered it. */
+            if (c >= 0x8000)
+            {
+                static int reported = 0;
+                if (reported < 5)
+                {
+                    char buf[80];
+                    reported++;
+                    sprintf(buf, "FT2  high codepoint U+%04X (was %d signed)\n",
+                            (unsigned)c, (int)(short)c);
+                    access->funcs.puts(buf);
+                }
+            }
+#endif
 
             /* This should be done via a macro! */
             if (c < 256)
@@ -2140,7 +2286,7 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
                 glyph = &((c_glyph *)font->extra.cache)[c];
             } else
             {
-                if (((c_glyph *)font->extra.scratch)->cached != c)
+                if ((unsigned short)((c_glyph *)font->extra.scratch)->cached != c)
                 {
                     ft2_flush_glyph(font->extra.scratch);
                 }
@@ -2187,6 +2333,8 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
     textbuf->bitplanes = 1;
     /* +1 for end write */
     textbuf->wdwidth = ((width + 15) >> 4) + 1; /* Words per line */
+    FT2_SIZE_CHECK("textbuf wdwidth*2*height", textbuf->wdwidth, textbuf->height, width,
+                   (long)textbuf->wdwidth * 2 * textbuf->height);
     textbuf->address = malloc(textbuf->wdwidth * 2 * textbuf->height);
     if (textbuf->address == NULL)
     {
@@ -2214,7 +2362,7 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
     xstart = 0;
     for (ch = text; ch < end; ++ch)
     {
-        short c = *ch;
+        unsigned short c = (unsigned short)*ch;   /* unsigned: see the note above */
 
 #ifdef FVDI_DEBUG
         if (debug > 2)
@@ -2267,7 +2415,7 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
             glyph = &((c_glyph *)font->extra.cache)[c];
         } else
         {
-            if (((c_glyph *)font->extra.scratch)->cached != c)
+            if ((unsigned short)((c_glyph *)font->extra.scratch)->cached != c)
             {
                 ft2_flush_glyph(font->extra.scratch);
             }
