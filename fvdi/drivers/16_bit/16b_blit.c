@@ -32,9 +32,6 @@ static void debug_out(const char *text1, int w, int old_w, int h, int src_x, int
 
 
 #ifdef __mcoldfire__
-#define MOVE_L " move.l "
-#define ASR_L  " asr.l "
-#define AND_L  " and.l "
 #define OR_W(val, ptr, dec, inc) \
 	" move.w " dec "(%[" ptr "])" inc ",%[x4]\n" \
 	" or.l %[" val "],%[x4]\n" \
@@ -44,65 +41,94 @@ static void debug_out(const char *text1, int w, int old_w, int h, int src_x, int
         " jbpl " label "\n"
 #define REGL long
 #else
-#define MOVE_L " move.w "
-#define ASR_L  " asr.w "
-#define AND_L  " and.w "
 #define OR_W(val, ptr, dec, inc)   " or.w %[" val "]," dec "(%[" ptr "])" inc "\n"
 #define DBRA(reg, label) " dbra " reg "," label "\n"
 #define REGL short
 #endif
 
 
-#define DO_OP(v) \
+/*
+ * The copy loops below are unrolled eight longs deep.  On a 68000 a screen
+ * copy is limited by the loop overhead rather than by the moves themselves,
+ * and 'move.l (a0)+,(a1)+' needs no scratch register, so the unrolling is free.
+ */
+#define REP2(x) x x
+#define REP8(x) x x x x x x x x
+
+
+/*
+ * The 16 raster operations as (source, destination) expressions.
+ * 'operation' is fixed for a whole blit, but gcc will not unswitch a switch
+ * on it out of the pixel loop, so the loops below are generated once per
+ * operation and the dispatch is done by hand, before the loop is entered.
+ */
+#define ROP_0(s, d)     (0)
+#define ROP_1(s, d)     ((s) & (d))
+#define ROP_2(s, d)     ((s) & ~(d))
+#define ROP_3(s, d)     (s)
+#define ROP_4(s, d)     (~(s) & (d))
+#define ROP_5(s, d)     (d)
+#define ROP_6(s, d)     ((s) ^ (d))
+#define ROP_7(s, d)     ((s) | (d))
+#define ROP_8(s, d)     (~((s) | (d)))
+#define ROP_9(s, d)     (~((s) ^ (d)))
+#define ROP_10(s, d)    (~(d))
+#define ROP_11(s, d)    ((s) | ~(d))
+#define ROP_12(s, d)    (~(s))
+#define ROP_13(s, d)    (~(s) | (d))
+#define ROP_14(s, d)    (~((s) & (d)))
+#define ROP_15(s, d)    (-1)
+
+#define ROP_SWITCH(loop) \
     switch(operation) { \
     case 0: \
     default: \
-        v = 0; \
+        loop(ROP_0); \
         break; \
     case 1: \
-        v = v ## s & v ## d; \
+        loop(ROP_1); \
         break; \
     case 2: \
-        v = v ## s & ~v ## d; \
+        loop(ROP_2); \
         break; \
     case 3: \
-        v = v ## s; \
+        loop(ROP_3); \
         break; \
     case 4: \
-        v = ~v ## s & v ## d; \
+        loop(ROP_4); \
         break; \
     case 5: \
-        v = v ## d; \
+        loop(ROP_5); \
         break; \
     case 6: \
-        v = v ## s ^ v ## d; \
+        loop(ROP_6); \
         break; \
     case 7: \
-        v = v ## s | v ## d; \
+        loop(ROP_7); \
         break; \
     case 8: \
-        v = ~(v ## s | v ## d); \
+        loop(ROP_8); \
         break; \
     case 9: \
-        v = ~(v ## s ^ v ## d); \
+        loop(ROP_9); \
         break; \
     case 10: \
-        v = ~v ## d; \
+        loop(ROP_10); \
         break; \
     case 11: \
-        v = v ## s | ~v ## d; \
+        loop(ROP_11); \
         break; \
     case 12: \
-        v = ~v ## s; \
+        loop(ROP_12); \
         break; \
     case 13: \
-        v = ~v ## s | v ## d; \
+        loop(ROP_13); \
         break; \
     case 14: \
-        v = ~(v ## s & v ## d); \
+        loop(ROP_14); \
         break; \
     case 15: \
-        v = -1; \
+        loop(ROP_15); \
         break; \
     }
 
@@ -123,68 +149,76 @@ static void s_blit_copy(PIXEL *src_addr, int src_line_add,
     PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
     short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
 #ifdef BOTH
     PIXEL_32 v32;
 
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l (%[src_addr])+,%[v32]\n" \
             " move.l %[v32],(%[dst_addr])+\n" \
-            " move.l %[v32],(%[dst_addr_fast])+\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " move.l %[v32],(%[dst_addr])+\n" \
-            " move.l %[v32],(%[dst_addr_fast])+\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " move.l %[v32],(%[dst_addr_fast])+\n"
+#define COPY_WORD \
             " move.w (%[src_addr])+,%[v32]\n" \
             " move.w %[v32],(%[dst_addr])+\n" \
-            " move.w %[v32],(%[dst_addr_fast])+\n" \
+            " move.w %[v32],(%[dst_addr_fast])+\n"
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l (%[src_addr])+,(%[dst_addr])+\n"
+#define COPY_WORD \
+            " move.w (%[src_addr])+,(%[dst_addr])+\n"
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l (%[src_addr])+,(%[dst_addr])+\n" \
-            " move.l (%[src_addr])+,(%[dst_addr])+\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w (%[src_addr])+,(%[dst_addr])+\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR) \
-            : [x]"d"(x) \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -193,14 +227,22 @@ static void s_blit_copy(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -210,72 +252,79 @@ static void s_blit_or(PIXEL *src_addr, int src_line_add,
         PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
         short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
     PIXEL_32 v32;
 
 #ifdef BOTH
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l (%[src_addr])+,%[v32]\n" \
             " or.l %[v32],(%[dst_addr])+\n" \
-            " or.l %[v32],(%[dst_addr_fast])+\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " or.l %[v32],(%[dst_addr])+\n" \
-            " or.l %[v32],(%[dst_addr_fast])+\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " or.l %[v32],(%[dst_addr_fast])+\n"
+#define COPY_WORD \
             " move.w (%[src_addr])+,%[v32]\n" \
             OR_W("v32","dst_addr","","+") \
-            OR_W("v32","dst_addr_fast","","+") \
+            OR_W("v32","dst_addr_fast","","+")
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l (%[src_addr])+,%[v32]\n" \
+            " or.l %[v32],(%[dst_addr])+\n"
+#define COPY_WORD \
+            " move.w (%[src_addr])+,%[v32]\n" \
+            OR_W("v32","dst_addr","","+")
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " or.l %[v32],(%[dst_addr])+\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " or.l %[v32],(%[dst_addr])+\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w (%[src_addr])+,%[v32]\n" \
-            OR_W("v32","dst_addr","","+") \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -284,14 +333,22 @@ static void s_blit_or(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -310,53 +367,68 @@ static void s_blit(PIXEL *src_addr, int src_line_add,
     PIXEL_32 *dst_addr_fast32;
 #endif
 
+#ifdef BOTH
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *src_addr++; \
+            vd = *dst_addr_fast; \
+            v = rop(vs, vd); \
+            *dst_addr_fast++ = v; \
+            *dst_addr++ = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast; \
+        for(j = (w >> 1) - 1; j >= 0; j--) { \
+            v32s = *src_addr32++; \
+            v32d = *dst_addr_fast32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr_fast32++ = v32; \
+            *dst_addr32++ = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+        dst_addr_fast = (PIXEL *)dst_addr_fast32; \
+        dst_addr_fast += dst_line_add; \
+    }
+#else
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *src_addr++; \
+            vd = *dst_addr; \
+            v = rop(vs, vd); \
+            *dst_addr++ = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        for(j = (w >> 1) - 1; j >= 0; j--) { \
+            v32s = *src_addr32++; \
+            v32d = *dst_addr32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr32++ = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+    }
+#endif
+
     (void) dst_addr_fast;
     /* Tell gcc that this cannot happen (already checked in c_blit_area() below) */
     if (w <= 0 || h <= 0)
         unreachable();
-    for (i = h - 1; i >= 0; i--)
-    {
-        if (w & 1)
-        {
-            vs = *src_addr++;
-#ifdef BOTH
-            vd = *dst_addr_fast;
-#else
-            vd = *dst_addr;
-#endif
-            DO_OP(v);
-#ifdef BOTH
-            *dst_addr_fast++ = v;
-#endif
-            *dst_addr++ = v;
-        }
-        src_addr32 = (PIXEL_32 *)src_addr;
-        dst_addr32 = (PIXEL_32 *)dst_addr;
-#ifdef BOTH
-        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast;
-#endif
-        for(j = (w >> 1) - 1; j >= 0; j--) {
-            v32s = *src_addr32++;
-#ifdef BOTH
-            v32d = *dst_addr_fast32;
-#else
-            v32d = *dst_addr32;
-#endif
-            DO_OP(v32);
-#ifdef BOTH
-            *dst_addr_fast32++ = v32;
-#endif
-            *dst_addr32++ = v32;
-        }
-        src_addr = (PIXEL *)src_addr32;
-        dst_addr = (PIXEL *)dst_addr32;
-        src_addr += src_line_add;
-        dst_addr += dst_line_add;
-#ifdef BOTH
-        dst_addr_fast = (PIXEL *)dst_addr_fast32;
-        dst_addr_fast += dst_line_add;
-#endif
-    }
+    ROP_SWITCH(BLIT_LOOP);
+
+#undef BLIT_LOOP
 }
 
 
@@ -365,68 +437,76 @@ s_pan_backwards_copy(PIXEL *src_addr, int src_line_add,
                      PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
                      short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
 #ifdef BOTH
     PIXEL_32 v32;
 
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l -(%[src_addr]),%[v32]\n" \
             " move.l %[v32],-(%[dst_addr])\n" \
-            " move.l %[v32],-(%[dst_addr_fast])\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " move.l %[v32],-(%[dst_addr])\n" \
-            " move.l %[v32],-(%[dst_addr_fast])\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " move.l %[v32],-(%[dst_addr_fast])\n"
+#define COPY_WORD \
             " move.w -(%[src_addr]),%[v32]\n" \
             " move.w %[v32],-(%[dst_addr])\n" \
-            " move.w %[v32],-(%[dst_addr_fast])\n" \
+            " move.w %[v32],-(%[dst_addr_fast])\n"
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l -(%[src_addr]),-(%[dst_addr])\n"
+#define COPY_WORD \
+            " move.w -(%[src_addr]),-(%[dst_addr])\n"
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l -(%[src_addr]),-(%[dst_addr])\n" \
-            " move.l -(%[src_addr]),-(%[dst_addr])\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w -(%[src_addr]),-(%[dst_addr])\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR) \
-            : [x]"d"(x) \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -435,14 +515,22 @@ s_pan_backwards_copy(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -453,72 +541,79 @@ s_pan_backwards_or(PIXEL *src_addr, int src_line_add,
                    PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
                    short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
     PIXEL_32 v32;
 
 #ifdef BOTH
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l -(%[src_addr]),%[v32]\n" \
             " or.l %[v32],-(%[dst_addr])\n" \
-            " or.l %[v32],-(%[dst_addr_fast])\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " or.l %[v32],-(%[dst_addr])\n" \
-            " or.l %[v32],-(%[dst_addr_fast])\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " or.l %[v32],-(%[dst_addr_fast])\n"
+#define COPY_WORD \
             " move.w -(%[src_addr]),%[v32]\n" \
             OR_W("v32","dst_addr","-","") \
-            OR_W("v32","dst_addr_fast","-","") \
+            OR_W("v32","dst_addr_fast","-","")
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l -(%[src_addr]),%[v32]\n" \
+            " or.l %[v32],-(%[dst_addr])\n"
+#define COPY_WORD \
+            " move.w -(%[src_addr]),%[v32]\n" \
+            OR_W("v32","dst_addr","-","")
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " or.l %[v32],-(%[dst_addr])\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " or.l %[v32],-(%[dst_addr])\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w -(%[src_addr]),%[v32]\n" \
-            OR_W("v32","dst_addr","-","") \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -527,14 +622,22 @@ s_pan_backwards_or(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -553,55 +656,71 @@ s_pan_backwards(PIXEL *src_addr, int src_line_add,
 #ifdef BOTH
     PIXEL_32 *dst_addr_fast32;
 #endif
-    
+
+#ifdef BOTH
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *--src_addr; \
+            vd = *--dst_addr_fast; \
+            v = rop(vs, vd); \
+            *dst_addr_fast = v; \
+            *--dst_addr = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast; \
+        for (j = (w >> 1) - 1; j >= 0; j--) \
+        { \
+            v32s = *--src_addr32; \
+            v32d = *--dst_addr_fast32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr_fast32 = v32; \
+            *--dst_addr32 = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+        dst_addr_fast = (PIXEL *)dst_addr_fast32; \
+        dst_addr_fast += dst_line_add; \
+    }
+#else
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *--src_addr; \
+            vd = *--dst_addr; \
+            v = rop(vs, vd); \
+            *dst_addr = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        for (j = (w >> 1) - 1; j >= 0; j--) \
+        { \
+            v32s = *--src_addr32; \
+            v32d = *--dst_addr32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr32 = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+    }
+#endif
+
     (void) dst_addr_fast;
     /* Tell gcc that this cannot happen (already checked in c_blit_area() below) */
     if (w <= 0 || h <= 0)
         unreachable();
-    for (i = h - 1; i >= 0; i--)
-    {
-        if (w & 1)
-        {
-            vs = *--src_addr;
-#ifdef BOTH
-            vd = *--dst_addr_fast;
-#else
-            vd = *--dst_addr;
-#endif
-            DO_OP(v);
-#ifdef BOTH
-            *dst_addr_fast = v;
-#endif
-            *dst_addr = v;
-        }
-        src_addr32 = (PIXEL_32 *)src_addr;
-        dst_addr32 = (PIXEL_32 *)dst_addr;
-#ifdef BOTH
-        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast;
-#endif
-        for (j = (w >> 1) - 1; j >= 0; j--)
-        {
-            v32s = *--src_addr;
-#ifdef BOTH
-            v32d = *--dst_addr_fast32;
-#else
-            v32d = *--dst_addr32;
-#endif
-            DO_OP(v32);
-#ifdef BOTH
-            *dst_addr_fast32 = v32;
-#endif
-            *dst_addr32 = v32;
-        }
-        src_addr = (PIXEL *)src_addr32;
-        dst_addr = (PIXEL *)dst_addr32;
-        src_addr += src_line_add;
-        dst_addr += dst_line_add;
-#ifdef BOTH
-        dst_addr_fast = (PIXEL *)dst_addr_fast32;
-        dst_addr_fast += dst_line_add;
-#endif
-    }
+    ROP_SWITCH(BLIT_LOOP);
+
+#undef BLIT_LOOP
 }
 
 #define BOTH_WAS_ON
@@ -618,68 +737,76 @@ static void blit_copy(PIXEL *src_addr, int src_line_add,
     PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
     short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
 #ifdef BOTH
     PIXEL_32 v32;
 
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l (%[src_addr])+,%[v32]\n" \
             " move.l %[v32],(%[dst_addr])+\n" \
-            " move.l %[v32],(%[dst_addr_fast])+\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " move.l %[v32],(%[dst_addr])+\n" \
-            " move.l %[v32],(%[dst_addr_fast])+\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " move.l %[v32],(%[dst_addr_fast])+\n"
+#define COPY_WORD \
             " move.w (%[src_addr])+,%[v32]\n" \
             " move.w %[v32],(%[dst_addr])+\n" \
-            " move.w %[v32],(%[dst_addr_fast])+\n" \
+            " move.w %[v32],(%[dst_addr_fast])+\n"
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l (%[src_addr])+,(%[dst_addr])+\n"
+#define COPY_WORD \
+            " move.w (%[src_addr])+,(%[dst_addr])+\n"
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l (%[src_addr])+,(%[dst_addr])+\n" \
-            " move.l (%[src_addr])+,(%[dst_addr])+\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w (%[src_addr])+,(%[dst_addr])+\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR) \
-            : [x]"d"(x) \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -688,14 +815,22 @@ static void blit_copy(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -705,72 +840,79 @@ static void blit_or(PIXEL *src_addr, int src_line_add,
         PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
         short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
     PIXEL_32 v32;
 
 #ifdef BOTH
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l (%[src_addr])+,%[v32]\n" \
             " or.l %[v32],(%[dst_addr])+\n" \
-            " or.l %[v32],(%[dst_addr_fast])+\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " or.l %[v32],(%[dst_addr])+\n" \
-            " or.l %[v32],(%[dst_addr_fast])+\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " or.l %[v32],(%[dst_addr_fast])+\n"
+#define COPY_WORD \
             " move.w (%[src_addr])+,%[v32]\n" \
             OR_W("v32","dst_addr","","+")" \
-            OR_W("v32","dst_addr_fast","","+")" \
+            OR_W("v32","dst_addr_fast","","+")"
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l (%[src_addr])+,%[v32]\n" \
+            " or.l %[v32],(%[dst_addr])+\n"
+#define COPY_WORD \
+            " move.w (%[src_addr])+,%[v32]\n" \
+            OR_W("v32","dst_addr","","+")
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " or.l %[v32],(%[dst_addr])+\n" \
-            " move.l (%[src_addr])+,%[v32]\n" \
-            " or.l %[v32],(%[dst_addr])+\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w (%[src_addr])+,%[v32]\n" \
-            OR_W("v32","dst_addr","","+") \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -779,14 +921,22 @@ static void blit_or(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -805,53 +955,68 @@ static void blit_16b(PIXEL *src_addr, int src_line_add,
     PIXEL_32 *dst_addr_fast32;
 #endif
 
+#ifdef BOTH
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *src_addr++; \
+            vd = *dst_addr_fast; \
+            v = rop(vs, vd); \
+            *dst_addr_fast++ = v; \
+            *dst_addr++ = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast; \
+        for(j = (w >> 1) - 1; j >= 0; j--) { \
+            v32s = *src_addr32++; \
+            v32d = *dst_addr_fast32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr_fast32++ = v32; \
+            *dst_addr32++ = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+        dst_addr_fast = (PIXEL *)dst_addr_fast32; \
+        dst_addr_fast += dst_line_add; \
+    }
+#else
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *src_addr++; \
+            vd = *dst_addr; \
+            v = rop(vs, vd); \
+            *dst_addr++ = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        for(j = (w >> 1) - 1; j >= 0; j--) { \
+            v32s = *src_addr32++; \
+            v32d = *dst_addr32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr32++ = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+    }
+#endif
+
     (void) dst_addr_fast;
     /* Tell gcc that this cannot happen (already checked in c_blit_area() below) */
     if (w <= 0 || h <= 0)
         unreachable();
-    for (i = h - 1; i >= 0; i--)
-    {
-        if (w & 1)
-        {
-            vs = *src_addr++;
-#ifdef BOTH
-            vd = *dst_addr_fast;
-#else
-            vd = *dst_addr;
-#endif
-            DO_OP(v);
-#ifdef BOTH
-            *dst_addr_fast++ = v;
-#endif
-            *dst_addr++ = v;
-        }
-        src_addr32 = (PIXEL_32 *)src_addr;
-        dst_addr32 = (PIXEL_32 *)dst_addr;
-#ifdef BOTH
-        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast;
-#endif
-        for(j = (w >> 1) - 1; j >= 0; j--) {
-            v32s = *src_addr32++;
-#ifdef BOTH
-            v32d = *dst_addr_fast32;
-#else
-            v32d = *dst_addr32;
-#endif
-            DO_OP(v32);
-#ifdef BOTH
-            *dst_addr_fast32++ = v32;
-#endif
-            *dst_addr32++ = v32;
-        }
-        src_addr = (PIXEL *)src_addr32;
-        dst_addr = (PIXEL *)dst_addr32;
-        src_addr += src_line_add;
-        dst_addr += dst_line_add;
-#ifdef BOTH
-        dst_addr_fast = (PIXEL *)dst_addr_fast32;
-        dst_addr_fast += dst_line_add;
-#endif
-    }
+    ROP_SWITCH(BLIT_LOOP);
+
+#undef BLIT_LOOP
 }
 
 
@@ -860,68 +1025,76 @@ pan_backwards_copy(PIXEL *src_addr, int src_line_add,
                    PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
                    short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
 #ifdef BOTH
     PIXEL_32 v32;
 
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l -(%[src_addr]),%[v32]\n" \
             " move.l %[v32],-(%[dst_addr])\n" \
-            " move.l %[v32],-(%[dst_addr_fast])\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " move.l %[v32],-(%[dst_addr])\n" \
-            " move.l %[v32],-(%[dst_addr_fast])\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " move.l %[v32],-(%[dst_addr_fast])\n"
+#define COPY_WORD \
             " move.w -(%[src_addr]),%[v32]\n" \
             " move.w %[v32],-(%[dst_addr])\n" \
-            " move.w %[v32],-(%[dst_addr_fast])\n" \
+            " move.w %[v32],-(%[dst_addr_fast])\n"
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l -(%[src_addr]),-(%[dst_addr])\n"
+#define COPY_WORD \
+            " move.w -(%[src_addr]),-(%[dst_addr])\n"
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l -(%[src_addr]),-(%[dst_addr])\n" \
-            " move.l -(%[src_addr]),-(%[dst_addr])\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w -(%[src_addr]),-(%[dst_addr])\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR) \
-            : [x]"d"(x) \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -930,14 +1103,22 @@ pan_backwards_copy(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -948,72 +1129,79 @@ pan_backwards_or(PIXEL *src_addr, int src_line_add,
                  PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add,
                  short int w, short int h)
 {
-    REGL x, y, x4, xR;
+    REGL y, n16, n4, nR, x16, x4, xR;
     PIXEL_32 v32;
 
 #ifdef BOTH
-#define COPY_LOOP \
-        __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
-            " jbra 2f\n" \
-            "1:\n" \
+#define COPY_LONG \
             " move.l -(%[src_addr]),%[v32]\n" \
             " or.l %[v32],-(%[dst_addr])\n" \
-            " or.l %[v32],-(%[dst_addr_fast])\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " or.l %[v32],-(%[dst_addr])\n" \
-            " or.l %[v32],-(%[dst_addr_fast])\n" \
-            "2:\n" \
-            DBRA("%[x4]","1b") \
-            " jbra 4f\n" \
-            "3:\n" \
+            " or.l %[v32],-(%[dst_addr_fast])\n"
+#define COPY_WORD \
             " move.w -(%[src_addr]),%[v32]\n" \
             OR_W("v32","dst_addr","-","") \
-            OR_W("v32","dst_addr_fast","-","") \
+            OR_W("v32","dst_addr_fast","-","")
+#define COPY_LOOP \
+        __asm__ __volatile__( \
+            " jbra 2f\n" \
+            "1:\n" \
+            REP8(COPY_LONG) \
+            "2:\n" \
+            DBRA("%[x16]","1b") \
+            " jbra 4f\n" \
+            "3:\n" \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [dst_addr_fast]"+a"(dst_addr_fast), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
         dst_addr += dst_line_add; \
         dst_addr_fast += dst_line_add
 #else
+#define COPY_LONG \
+            " move.l -(%[src_addr]),%[v32]\n" \
+            " or.l %[v32],-(%[dst_addr])\n"
+#define COPY_WORD \
+            " move.w -(%[src_addr]),%[v32]\n" \
+            OR_W("v32","dst_addr","-","")
 #define COPY_LOOP \
         __asm__ __volatile__( \
-            MOVE_L "%[x],%[x4]\n" \
-            MOVE_L "%[x],%[xR]\n" \
-            ASR_L "#2,%[x4]\n" \
-            AND_L "#3,%[xR]\n" \
             " jbra 2f\n" \
             "1:\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " or.l %[v32],-(%[dst_addr])\n" \
-            " move.l -(%[src_addr]),%[v32]\n" \
-            " or.l %[v32],-(%[dst_addr])\n" \
+            REP8(COPY_LONG) \
             "2:\n" \
-            DBRA("%[x4]","1b") \
+            DBRA("%[x16]","1b") \
             " jbra 4f\n" \
             "3:\n" \
-            " move.w -(%[src_addr]),%[v32]\n" \
-            OR_W("v32","dst_addr","-","") \
+            REP2(COPY_LONG) \
             "4:\n" \
-            DBRA("%[xR]","3b") \
+            DBRA("%[x4]","3b") \
+            " jbra 6f\n" \
+            "5:\n" \
+            COPY_WORD \
+            "6:\n" \
+            DBRA("%[xR]","5b") \
             : [dst_addr]"+a"(dst_addr), \
               [src_addr]"+a"(src_addr), \
-              [x4]"=d"(x4), \
-              [xR]"=d"(xR), \
+              [x16]"+d"(x16), \
+              [x4]"+d"(x4), \
+              [xR]"+d"(xR), \
               [v32]"=d"(v32) \
-            : [x]"d"(x) \
+            : \
             : "cc", "memory")
 #define NEXTLINE \
         src_addr += src_line_add; \
@@ -1022,14 +1210,22 @@ pan_backwards_or(PIXEL *src_addr, int src_line_add,
 
     (void) dst_addr_fast;
 
-    x = w;
+    /* The split of w into 16, 4 and 1 pixel steps is the same for every row */
+    n16 = w >> 4;
+    n4 = (w >> 2) & 3;
+    nR = w & 3;
     y = h;
     while (y--)
     {
+        x16 = n16;
+        x4 = n4;
+        xR = nR;
         COPY_LOOP;
         NEXTLINE;
     }
 
+#undef COPY_LONG
+#undef COPY_WORD
 #undef COPY_LOOP
 #undef NEXTLINE
 }
@@ -1048,63 +1244,77 @@ pan_backwards(PIXEL *src_addr, int src_line_add,
 #ifdef BOTH
     PIXEL_32 *dst_addr_fast32;
 #endif
-    
+
+#ifdef BOTH
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *--src_addr; \
+            vd = *--dst_addr_fast; \
+            v = rop(vs, vd); \
+            *dst_addr_fast = v; \
+            *--dst_addr = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast; \
+        for (j = (w >> 1) - 1; j >= 0; j--) \
+        { \
+            v32s = *--src_addr32; \
+            v32d = *--dst_addr_fast32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr_fast32 = v32; \
+            *--dst_addr32 = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+        dst_addr_fast = (PIXEL *)dst_addr_fast32; \
+        dst_addr_fast += dst_line_add; \
+    }
+#else
+#define BLIT_LOOP(rop) \
+    for (i = h - 1; i >= 0; i--) \
+    { \
+        if (w & 1) \
+        { \
+            vs = *--src_addr; \
+            vd = *--dst_addr; \
+            v = rop(vs, vd); \
+            *dst_addr = v; \
+        } \
+        src_addr32 = (PIXEL_32 *)src_addr; \
+        dst_addr32 = (PIXEL_32 *)dst_addr; \
+        for (j = (w >> 1) - 1; j >= 0; j--) \
+        { \
+            v32s = *--src_addr32; \
+            v32d = *--dst_addr32; \
+            v32 = rop(v32s, v32d); \
+            *dst_addr32 = v32; \
+        } \
+        src_addr = (PIXEL *)src_addr32; \
+        dst_addr = (PIXEL *)dst_addr32; \
+        src_addr += src_line_add; \
+        dst_addr += dst_line_add; \
+    }
+#endif
+
     (void) dst_addr_fast;
     /* Tell gcc that this cannot happen (already checked in c_blit_area() below) */
     if (w <= 0 || h <= 0)
         unreachable();
-    for (i = h - 1; i >= 0; i--)
-    {
-        if (w & 1)
-        {
-            vs = *--src_addr;
-#ifdef BOTH
-            vd = *--dst_addr_fast;
-#else
-            vd = *--dst_addr;
-#endif
-            DO_OP(v);
-#ifdef BOTH
-            *dst_addr_fast = v;
-#endif
-            *dst_addr = v;
-        }
-        src_addr32 = (PIXEL_32 *)src_addr;
-        dst_addr32 = (PIXEL_32 *)dst_addr;
-#ifdef BOTH
-        dst_addr_fast32 = (PIXEL_32 *)dst_addr_fast;
-#endif
-        for (j = (w >> 1) - 1; j >= 0; j--)
-        {
-            v32s = *--src_addr;
-#ifdef BOTH
-            v32d = *--dst_addr_fast32;
-#else
-            v32d = *--dst_addr32;
-#endif
-            DO_OP(v32);
-#ifdef BOTH
-            *dst_addr_fast32 = v32;
-#endif
-            *dst_addr32 = v32;
-        }
-        src_addr = (PIXEL *)src_addr32;
-        dst_addr = (PIXEL *)dst_addr32;
-        src_addr += src_line_add;
-        dst_addr += dst_line_add;
-#ifdef BOTH
-        dst_addr_fast = (PIXEL *)dst_addr_fast32;
-        dst_addr_fast += dst_line_add;
-#endif
-    }
+    ROP_SWITCH(BLIT_LOOP);
+
+#undef BLIT_LOOP
 }
 
 
 #ifdef BOTH_WAS_ON
 #define BOTH
 #endif
-
-#undef DO_OP
 
 
 long CDECL
