@@ -742,11 +742,41 @@ void qsort(void *base, long nmemb, long size, int (*compar) (const void *, const
 #endif
 
 
+/*
+ * FVDI_ALLOC_TRAP - diagnostic build only.
+ *
+ * Something in the font path asks for a negative allocation size, which
+ * arrives here as a huge size_t and leaves as a negative long, so the
+ * failure is reported by fmalloc as Mxalloc(-552864) with no indication
+ * of who asked.  This reports the caller instead of guessing at it.
+ *
+ * The address is printed BOTH absolutely and as a delta from malloc()
+ * itself, because fVDI is a relocated PRG: the absolute value differs
+ * every boot, the delta is a link-time constant and can be looked up in
+ * fvdi.map without knowing where the driver landed.
+ */
+#ifdef FVDI_ALLOC_TRAP
+static void alloc_trap(const char *where, long size, void *caller)
+{
+    kprintf("fVDI: BAD ALLOC %s size=%ld ($%lx) caller=$%08lx delta=$%lx\n",
+            where, size, size, (long)caller,
+            (long)caller - (long)&malloc);
+}
+#define ALLOC_TRAP(where, size) \
+    do { if ((long)(size) <= 0) \
+             alloc_trap((where), (long)(size), __builtin_return_address(0)); \
+    } while (0)
+#else
+#define ALLOC_TRAP(where, size) do { } while (0)
+#endif
+
 void *fmalloc(long size, long type)
 {
     Circle *new;
     long bp;
     long *ppid = pid;
+
+    ALLOC_TRAP("fmalloc", size);
 
     if (ppid)
     {
@@ -1070,6 +1100,8 @@ void *DRIVER_EXPORT malloc(size_t size)
     const int sizes = (int)(sizeof(block_space) / sizeof(block_space[0]));
     char *block;
     Circle *link, *next;
+
+    ALLOC_TRAP("malloc", size);
 
     size += ext_malloc;
 
