@@ -118,8 +118,11 @@ v_clear_disp_list:
 v_bit_image:
 	bra	redirect
 
+* Not implemented here, but the previous VDI can do them.
+* Must not fall through the end of the file!
 v_contourfill:
 v_cellarray:
+	bra	redirect
 
   ifne 0
 v_rbox:
