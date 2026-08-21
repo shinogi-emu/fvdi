@@ -29,6 +29,90 @@
  * - some compilers can't deal well with *var++ constructs
  */
 
+
+/*
+ * Mono-to-16bpp expansion, two pixels per store, no branch per pixel.
+ *
+ * This is how every character reaches the screen.  The straightforward
+ * version tests one source bit, branches on it, stores one 16-bit pixel,
+ * shifts the mask and branches again to refill - so a glyph costs a
+ * mispredictable branch per pixel, and glyph edges mispredict constantly.
+ *
+ * Here the two possible pixels are precomputed into a four-entry table
+ * indexed by two source bits, so a pair of pixels is one long store and
+ * no branch at all.  The source is read through a 32-bit accumulator
+ * because a pair can straddle a word boundary and the run can start at
+ * any bit.
+ *
+ * SOURCE ADVANCE IS LOAD-BEARING.  The original reads one word up front
+ * and one more every time the mask wraps, which is 1 + ((bit + w) >> 4)
+ * words, and the caller's row stride assumes exactly that.  This
+ * computes the same figure rather than counting reads, so the two agree
+ * even though this reads words on a different schedule.
+ */
+static void expand_row_replace(PIXEL *dst, const short *src, int bit, int n,
+                               PIXEL foreground, PIXEL background)
+{
+    unsigned long pair[4];
+    PIXEL fgbg[2];
+    unsigned long acc;
+    unsigned long *q;
+    int avail, k;
+
+    if (n <= 0)
+        return;
+
+    fgbg[0] = background;
+    fgbg[1] = foreground;
+    pair[0] = ((unsigned long)(unsigned short)background << 16) | (unsigned short)background;
+    pair[1] = ((unsigned long)(unsigned short)background << 16) | (unsigned short)foreground;
+    pair[2] = ((unsigned long)(unsigned short)foreground << 16) | (unsigned short)background;
+    pair[3] = ((unsigned long)(unsigned short)foreground << 16) | (unsigned short)foreground;
+
+    /* Prime the accumulator so the next pixel's bit is the top bit. */
+    acc = (unsigned long)(unsigned short)*src++ << 16;
+    acc <<= bit;
+    avail = 16 - bit;
+
+    /* Odd leading pixel, so the pair stores below are long-aligned. */
+    if ((long)dst & 2)
+    {
+        if (avail == 0)
+        {
+            acc = (unsigned long)(unsigned short)*src++ << 16;
+            avail = 16;
+        }
+        *dst++ = fgbg[(acc >> 31) & 1];
+        acc <<= 1;
+        avail--;
+        n--;
+    }
+
+    q = (unsigned long *)dst;
+    for (k = n >> 1; k > 0; k--)
+    {
+        if (avail < 2)
+        {
+            acc |= (unsigned long)(unsigned short)*src++ << (16 - avail);
+            avail += 16;
+        }
+        *q++ = pair[(acc >> 30) & 3];
+        acc <<= 2;
+        avail -= 2;
+    }
+    dst = (PIXEL *)q;
+
+    if (n & 1)
+    {
+        if (avail == 0)
+        {
+            acc = (unsigned long)(unsigned short)*src++ << 16;
+            avail = 16;
+        }
+        *dst = fgbg[(acc >> 31) & 1];
+    }
+}
+
 #ifdef BOTH
 static void s_replace(short *src_addr, int src_line_add, PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add, int x, int w, int h, PIXEL foreground, PIXEL background)
 {
@@ -191,37 +275,18 @@ static void s_revtransp(short *src_addr, int src_line_add, PIXEL *dst_addr, PIXE
 
 static void replace(short *src_addr, int src_line_add, PIXEL *dst_addr, PIXEL *dst_addr_fast, int dst_line_add, int x, int w, int h, PIXEL foreground, PIXEL background)
 {
-    int i, j;
-    unsigned int expand_word, mask;
+    int i;
+    int bit = x & 0x000f;
+    /* Words the bit-at-a-time version would have read for this run: one
+     * up front, plus one per mask wrap.  The row stride depends on it. */
+    int words = 1 + ((bit + w) >> 4);
 
     (void) dst_addr_fast;
-    x = 1 << (15 - (x & 0x000f));
 
     for(i = h - 1; i >= 0; i--) {
-        expand_word = *src_addr++;
-        mask = x;
-        for(j = w - 1; j >= 0; j--) {
-            if (expand_word & mask) {
-#ifdef BOTH
-                *dst_addr_fast++ = foreground;
-#endif
-                *dst_addr++ = foreground;
-            } else {
-#ifdef BOTH
-                *dst_addr_fast++ = background;
-#endif
-                *dst_addr++ = background;
-            }
-            if (!(mask >>= 1)) {
-                mask = 0x8000;
-                expand_word = *src_addr++;
-            }
-        }
-        src_addr += src_line_add;
-        dst_addr += dst_line_add;
-#ifdef BOTH
-        dst_addr_fast += dst_line_add;
-#endif
+        expand_row_replace(dst_addr, src_addr, bit, w, foreground, background);
+        src_addr += words + src_line_add;
+        dst_addr += w + dst_line_add;
     }
 }
 
