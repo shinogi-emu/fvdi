@@ -1009,8 +1009,25 @@ static Fontheader *ft2_open_face(Virtual *vwk, Fontheader *font, short ptsize)
     if (!font->extra.cache)
     {
         font->extra.cache = malloc(sizeof(c_glyph) * 256);	/* Cache */
-        memset(font->extra.cache, 0, sizeof(c_glyph) * 256);	/* Cache */
         font->extra.scratch = malloc(sizeof(c_glyph));		/* Scratch */
+
+        /* Both must be checked BEFORE the memset.  A failed allocation here
+         * used to be cleared from address 0 onwards, which on this machine is
+         * the exception vector table and the TOS system variables -- the
+         * machine is destroyed long before anyone sees the out of memory. */
+        if (!font->extra.cache || !font->extra.scratch)
+        {
+            free(font->extra.cache);
+            free(font->extra.scratch);
+            font->extra.cache = NULL;
+            font->extra.scratch = NULL;
+            FT_Done_Face(face);
+            ff_release(font->extra.filename);
+            access->funcs.puts("FT2  open_face: no memory for the glyph cache\n");
+            return NULL;
+        }
+
+        memset(font->extra.cache, 0, sizeof(c_glyph) * 256);	/* Cache */
         memset(font->extra.scratch, 0, sizeof(c_glyph));
     }
 
@@ -1077,7 +1094,26 @@ static Fontheader *ft2_dup_font(Virtual *vwk, Fontheader *src, short ptsize)
         }
 #endif
 
-        font = ft2_open_face(vwk, font, ptsize);
+        {
+            Fontheader *opened = ft2_open_face(vwk, font, ptsize);
+
+            if (!opened)
+            {
+                /* open_face can fail after it has already attached the 256
+                 * entry glyph cache and the scratch entry -- roughly 19 KB
+                 * that the caller can no longer reach, since all it gets back
+                 * is NULL.  Dropping it here would compound the very memory
+                 * pressure that made the open fail.  Not ft2_dispose_font():
+                 * that walks the cache unconditionally and the cache may be
+                 * exactly what could not be allocated. */
+                free(font->extra.cache);
+                free(font->extra.scratch);
+                free(font->extra.filename);
+                free(font);
+            }
+
+            font = opened;
+        }
     }
 
     return font;
@@ -1372,7 +1408,7 @@ static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, unsigned short ch
     short bitmap_italics_shear;
     FT_Face face;
     FT_Error error;
-    FT_Glyph g;
+    FT_Glyph g = NULL;
     FT_GlyphSlot glyph;
 
     face = ft2_get_face(vwk, font);
@@ -1511,7 +1547,17 @@ static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, unsigned short ch
         }
     }
 
-    FT_Get_Glyph(glyph, &g);
+    /* FreeType fills in *aglyph only when it succeeds; every error path leaves
+     * the caller's variable alone, and the errors are dominated by allocation
+     * failure.  Unchecked, the stale value below is both dereferenced and
+     * indirectly called through clazz->glyph_bbox by FT_Glyph_Get_CBox (which
+     * only tests for NULL), and then freed by the FT_Done_Glyph at the end. */
+    error = FT_Get_Glyph(glyph, &g);
+    if (error)
+    {
+        access->funcs.puts(ft2_error("FT2  Couldn't get glyph", error));
+        return error;
+    }
 
     /* Outlined style */
     if (font->extra.effects & 0x10 && glyph->format != FT_GLYPH_FORMAT_BITMAP)
@@ -1634,6 +1680,18 @@ static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, unsigned short ch
 
         if (src->rows != 0)
         {
+            /* dst->width was widened above for shear and emboldening and the
+             * pitch derived from it can overflow into a negative int.  malloc()
+             * would then pass that on to Mxalloc as an enormous unsigned
+             * request, which is fatal for the whole VDI.  A glyph that cannot
+             * be represented is just a missing glyph, so fail this one only. */
+            if (dst->pitch <= 0 || (long)dst->pitch * (long)dst->rows <= 0)
+            {
+                access->funcs.puts("FT2  Glyph too large to represent\n");
+                FT_Done_Glyph(g);
+                return 1;
+            }
+
             FT2_SIZE_CHECK("glyph pitch*rows", dst->pitch, dst->rows, dst->width,
                            (long)dst->pitch * dst->rows);
             dst->buffer = malloc(dst->pitch * dst->rows);
@@ -2199,18 +2257,30 @@ static MFDB *ft2_text_render_antialias(Virtual *vwk, Fontheader *font, short x, 
         tb.wdwidth = (tb.width + 1) >> 1; /* Words per line */
         FT2_SIZE_CHECK("underline wdwidth*2*height", tb.wdwidth, tb.height, xstart,
                        (long)tb.wdwidth * 2 * tb.height);
-        tb.address = malloc(tb.wdwidth * 2 * tb.height);
-        memset(tb.address, (font->extra.effects & 0x2) ? 0xff / 3 : 0xff, tb.wdwidth * 2 * tb.height);
 
-        pxy[2] = tb.width - 1;
-        pxy[3] = tb.height - 1;
-        pxy[4] = x;
-        pxy[5] = y;
-        pxy[6] = pxy[4] + tb.width - 1;
-        pxy[7] = pxy[5] + tb.height - 1;
-        lib_vdi_spppp(&lib_vrt_cpyfm_nocheck, vwk, vwk->mode, pxy, &tb, NULL, colors);
+        /* The MFDB geometry is all shorts, so a long enough run of text wraps
+         * tb.width negative and the byte count with it; handing that to
+         * malloc() means an enormous unsigned request to Mxalloc, which is
+         * fatal.  An unchecked NULL is no better: the memset would run over the
+         * exception vectors.  A missing underline is survivable, so skip it. */
+        tb.address = NULL;
+        if ((long)tb.wdwidth * 2 * tb.height > 0)
+            tb.address = malloc(tb.wdwidth * 2 * tb.height);
 
-        free(tb.address);
+        if (tb.address)
+        {
+            memset(tb.address, (font->extra.effects & 0x2) ? 0xff / 3 : 0xff, tb.wdwidth * 2 * tb.height);
+
+            pxy[2] = tb.width - 1;
+            pxy[3] = tb.height - 1;
+            pxy[4] = x;
+            pxy[5] = y;
+            pxy[6] = pxy[4] + tb.width - 1;
+            pxy[7] = pxy[5] + tb.height - 1;
+            lib_vdi_spppp(&lib_vrt_cpyfm_nocheck, vwk, vwk->mode, pxy, &tb, NULL, colors);
+
+            free(tb.address);
+        }
     }
 
     return NULL;
@@ -2320,7 +2390,7 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
         }
 
         width = maxx - minx;
-        if (!width)
+        if (width <= 0)
             return NULL;
     }
 #endif
@@ -2335,6 +2405,14 @@ static MFDB *ft2_text_render(Virtual *vwk, Fontheader *font, const short *text, 
     textbuf->wdwidth = ((width + 15) >> 4) + 1; /* Words per line */
     FT2_SIZE_CHECK("textbuf wdwidth*2*height", textbuf->wdwidth, textbuf->height, width,
                    (long)textbuf->wdwidth * 2 * textbuf->height);
+
+    /* width and height are ints but the MFDB fields they land in are shorts:
+     * an oversized run truncates and the byte count goes negative, which
+     * malloc() forwards to Mxalloc as a huge unsigned request and dies on.
+     * Refuse to render the run instead of taking the VDI down with it. */
+    if ((long)textbuf->wdwidth * 2 * textbuf->height <= 0)
+        return NULL;
+
     textbuf->address = malloc(textbuf->wdwidth * 2 * textbuf->height);
     if (textbuf->address == NULL)
     {
@@ -2720,9 +2798,19 @@ static Fontheader *ft2_find_fontsize(Virtual *vwk, Fontheader *font, short ptsiz
     if (f)
     {
         i = malloc(sizeof(FontheaderListItem));
-        i->font = f;
-        listInsert(fonts.head.next, (LINKABLE *) i);
-        font_count++;
+        if (i)
+        {
+            i->font = f;
+            listInsert(fonts.head.next, (LINKABLE *) i);
+            font_count++;
+        } else
+        {
+            /* Without a list entry the font is unreachable: it could never be
+             * found again, flushed, or freed.  Drop it and report the failure
+             * the same way a failed dup_font does -- callers already cope. */
+            ft2_dispose_font(f);
+            f = NULL;
+        }
     }
 
     return f;
