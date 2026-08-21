@@ -154,6 +154,79 @@ static void solid_run(PIXEL **addrp, int n, PIXEL colour)
     *addrp = d;
 }
 
+/*
+ * Complement a run of pixels.  Complementing a long complements both
+ * the pixels it holds, so this can work a pair at a time exactly as
+ * solid_run() does, for the same reason: one aligned long store in
+ * place of two 16-bit read-modify-writes.
+ */
+static void not_run(PIXEL **addrp, int n)
+{
+    PIXEL *d = *addrp;
+    unsigned long *q;
+    int pairs;
+
+    if (n <= 0)
+        return;
+
+    if ((long)d & 2)
+    {
+        *d = ~*d;
+        d++;
+        if (--n == 0)
+        {
+            *addrp = d;
+            return;
+        }
+    }
+
+    q = (unsigned long *)d;
+
+    for (pairs = n >> 1; pairs >= 8; pairs -= 8)
+    {
+        q[0] = ~q[0]; q[1] = ~q[1]; q[2] = ~q[2]; q[3] = ~q[3];
+        q[4] = ~q[4]; q[5] = ~q[5]; q[6] = ~q[6]; q[7] = ~q[7];
+        q += 8;
+    }
+    while (pairs-- > 0)
+    {
+        *q = ~*q;
+        q++;
+    }
+
+    d = (PIXEL *)q;
+    if (n & 1)
+    {
+        *d = ~*d;
+        d++;
+    }
+
+    *addrp = d;
+}
+
+/*
+ * The same for a shadow buffer, which cannot use the pair trick: the
+ * source is read from one buffer and the result written to both, and
+ * the two buffers are not guaranteed to share an alignment, so the
+ * pixels are taken one at a time.
+ */
+static void not_run_both(PIXEL **addrp, PIXEL **fastp, int n)
+{
+    PIXEL *d = *addrp;
+    PIXEL *f = *fastp;
+    PIXEL v;
+
+    while (n-- > 0)
+    {
+        v = ~*f;
+        *f++ = v;
+        *d++ = v;
+    }
+
+    *addrp = d;
+    *fastp = f;
+}
+
 #ifdef BOTH
 static void s_fill_replace(PIXEL *addr, PIXEL *addr_fast, int line_add, short *pattern, int x, int y, int w, int h, PIXEL foreground, PIXEL background)
 {
@@ -214,14 +287,11 @@ static void s_fill_transparent(PIXEL *addr, PIXEL *addr_fast, int line_add, shor
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0xffff:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                *addr_fast = foreground;
-                addr_fast++;
+            solid_run(&addr_fast, w, foreground);
 #endif
-                *addr = foreground;
-                addr++;
-            }
+            solid_run(&addr, w, foreground);
+            (void) j;
             break;
         default:
             mask = x;
@@ -271,19 +341,12 @@ static void s_fill_xor(PIXEL *addr, PIXEL *addr_fast, int line_add, short *patte
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0xffff:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                v = ~*addr_fast;
+            not_run_both(&addr, &addr_fast, w);
 #else
-                v = ~*addr;
+            not_run(&addr, w);
 #endif
-#ifdef BOTH
-                *addr_fast = v;
-                addr_fast++;
-#endif
-                *addr = v;
-                addr++;
-            }
+            (void) j;
             break;
         default:
             mask = x;
@@ -336,14 +399,11 @@ static void s_fill_revtransp(PIXEL *addr, PIXEL *addr_fast, int line_add, short 
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0x0000:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                *addr_fast = foreground;
-                addr_fast++;
+            solid_run(&addr_fast, w, foreground);
 #endif
-                *addr = foreground;
-                addr++;
-            }
+            solid_run(&addr, w, foreground);
+            (void) j;
             break;
         default:
             mask = x;
@@ -443,14 +503,11 @@ static void fill_transparent(PIXEL *addr, PIXEL *addr_fast, int line_add, short 
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0xffff:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                *addr_fast = foreground;
-                addr_fast++;
+            solid_run(&addr_fast, w, foreground);
 #endif
-                *addr = foreground;
-                addr++;
-            }
+            solid_run(&addr, w, foreground);
+            (void) j;
             break;
         default:
             mask = x;
@@ -500,19 +557,12 @@ static void fill_xor(PIXEL *addr, PIXEL *addr_fast, int line_add, short *pattern
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0xffff:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                v = ~*addr_fast;
+            not_run_both(&addr, &addr_fast, w);
 #else
-                v = ~*addr;
+            not_run(&addr, w);
 #endif
-#ifdef BOTH
-                *addr_fast = v;
-                addr_fast++;
-#endif
-                *addr = v;
-                addr++;
-            }
+            (void) j;
             break;
         default:
             mask = x;
@@ -565,14 +615,11 @@ static void fill_revtransp(PIXEL *addr, PIXEL *addr_fast, int line_add, short *p
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0x0000:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                *addr_fast = foreground;
-                addr_fast++;
+            solid_run(&addr_fast, w, foreground);
 #endif
-                *addr = foreground;
-                addr++;
-            }
+            solid_run(&addr, w, foreground);
+            (void) j;
             break;
         default:
             mask = x;
