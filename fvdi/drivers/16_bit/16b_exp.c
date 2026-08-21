@@ -421,6 +421,28 @@ long CDECL c_expand_area(Virtual *vwk, MFDB *src, long src_x, long src_y, MFDB *
     unsigned long src_pos, dst_pos;
     int to_screen;
 
+    /*
+     * Everything below reads the source as a single mono plane, one bit per
+     * pixel, with a row stride of wdwidth words.  Text (bitmap fonts and the
+     * FreeType module's normal path) and the mouse forms all arrive that way.
+     *
+     * They are not the only thing that can arrive.  With the 'antialias'
+     * option on, the FreeType module hands vrt_cpyfm an eight-bit chunky
+     * form (standard 0x0100, 8 planes), and nothing between there and here
+     * looks at the plane count - the engine passes the MFDB straight to this
+     * hook.  Read as mono that is a wrong stride over bytes that mean grey
+     * levels, so it would draw rubbish over the destination.
+     *
+     * So refuse instead of guessing: returning 0 makes the engine fall back
+     * to its own expand for this call, which at least understands more
+     * formats, and it leaves the screen alone if it does not.  Only a plane
+     * count above one is refused, because a single-plane form is identical
+     * in standard and device format, and a source that works today keeps
+     * working.
+     */
+    if (src && (src->bitplanes > 1))
+        return 0;               /* Not handled - let the engine fall back */
+
     wk = vwk->real_address;
 
     c_get_colours(vwk, colour, &foreground, &background);
