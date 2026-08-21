@@ -441,6 +441,19 @@ typedef struct XFNT_INFO_ {
     char  file_name3[200];
     short pt_cnt;
     short pt_sizes[64];
+    /*
+     * Everything below here is filled in only when XFNT_INFO_CLASS is
+     * asked for, which is what makes it safe to have appended: a caller
+     * built against the older struct never sets that bit, so nothing is
+     * ever written past where its struct ends.  Note that fVDI does not
+     * consult the `size` field above - callers set it, but no
+     * implementation here reads it - so the flag is the only thing
+     * protecting them.
+     */
+    short         font_class;      /* FVDI_FCLASS_*, cooked answer */
+    short         font_flags;      /* FVDI_FFLAG_* */
+    short         family_class;    /* raw OS/2 sFamilyClass, 0 if none */
+    unsigned char panose[10];      /* raw OS/2 PANOSE, zeroed if none */
 } XFNT_INFO;
 /*
  * flags for vqt_xfntinfo()
@@ -453,6 +466,29 @@ typedef struct XFNT_INFO_ {
 #define XFNT_INFO_FILE_NAME3  0x0020
 #define XFNT_INFO_SIZES       0x0100
 #define XFNT_INFO_SIZES2      0x0200
+#define XFNT_INFO_CLASS       0x0400
+
+/*
+ * What kind of typeface this is, for pickers that want to group or
+ * label fonts rather than show one undifferentiated list.
+ *
+ * HOW A CALLER DETECTS SUPPORT.  There is no return value to test, so
+ * the caller zeroes font_flags, sets XFNT_INFO_CLASS, and looks for
+ * FVDI_FFLAG_VALID afterwards.  A VDI that does not implement the bit
+ * ignores it and writes nothing, so the flags word stays zero and the
+ * caller falls back to whatever it did before.  Without that bit,
+ * "unknown typeface" and "this VDI cannot tell me" would be the same
+ * answer, and they call for different behaviour.
+ */
+#define FVDI_FCLASS_UNKNOWN     0
+#define FVDI_FCLASS_SERIF       1
+#define FVDI_FCLASS_SANS        2
+#define FVDI_FCLASS_SCRIPT      3
+#define FVDI_FCLASS_DECORATIVE  4
+#define FVDI_FCLASS_SYMBOL      5
+
+#define FVDI_FFLAG_MONOSPACED   0x0001  /* fixed advance width */
+#define FVDI_FFLAG_VALID        0x8000  /* this block was filled in */
 
 
 typedef struct VQT_FHDR_ {

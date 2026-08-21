@@ -373,15 +373,36 @@ void CDECL lib_vqt_xfntinfo(Virtual *vwk, long flags, long id, long index, XFNT_
     /* 0x100 is without enlargement, 0x200 with */
     if (flags & (XFNT_INFO_SIZES|XFNT_INFO_SIZES2))
     {
-        i = 0;
-        font = font->extra.first_size;
-        while (font)
+        Fontheader *size_font = font->extra.first_size;
+
+        /* Bounded by the DESTINATION, not by the chain.  pt_sizes lives
+         * in the caller's struct, which is usually a local, so walking
+         * the chain to its end wrote past a stack buffer whenever a
+         * family had more sizes than the array holds. */
+        for (i = 0; size_font && i < (int)(sizeof(info->pt_sizes) / sizeof(info->pt_sizes[0])); i++)
         {
-            info->pt_sizes[i] = font->size;
-            i++;
-            font = font->extra.next_size;
+            info->pt_sizes[i] = size_font->size;
+            size_font = size_font->extra.next_size;
         }
         info->pt_cnt = i;
+    }
+
+    if (flags & XFNT_INFO_CLASS)
+    {
+        /* These are the built-in bitmap fonts.  There is no OS/2 table
+         * to consult and no shape analysis worth pretending to, so the
+         * typeface answer is UNKNOWN -- but the header already records
+         * whether the font is monospaced, and that much is worth
+         * reporting rather than withholding.  FVDI_FFLAG_VALID still
+         * goes back, because "I looked and cannot tell" is a different
+         * answer from "this VDI does not implement the call". */
+        info->font_class = FVDI_FCLASS_UNKNOWN;
+        info->font_flags = FVDI_FFLAG_VALID;
+        if (font->flags & FONTF_MONOSPACED)
+            info->font_flags |= FVDI_FFLAG_MONOSPACED;
+        info->family_class = 0;
+        for (i = 0; i < 10; i++)
+            info->panose[i] = 0;
     }
 }
 
