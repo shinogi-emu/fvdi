@@ -40,8 +40,8 @@ void CDECL vq_chcells(Virtual *vwk, short *rows, short *columns)
 {
     Workstation *wk = vwk->real_address;
 
-    *rows = (wk->screen.coordinates.max_x - wk->screen.coordinates.min_x + 1) / vwk->text.cell.width;
-    *columns = (wk->screen.coordinates.max_y - wk->screen.coordinates.min_y + 1) / vwk->text.cell.height;
+    *rows = (wk->screen.coordinates.max_y - wk->screen.coordinates.min_y + 1) / vwk->text.cell.height;
+    *columns = (wk->screen.coordinates.max_x - wk->screen.coordinates.min_x + 1) / vwk->text.cell.width;
 }
 
 
@@ -83,7 +83,7 @@ void CDECL v_curleft(Virtual *vwk)
     Workstation *wk = vwk->real_address;
 
     if (vwk->console.pos.x > wk->screen.coordinates.min_x + vwk->text.cell.width)
-        vwk->console.pos.x += vwk->text.cell.width;
+        vwk->console.pos.x -= vwk->text.cell.width;
     else
         vwk->console.pos.x = wk->screen.coordinates.min_x;
 }
