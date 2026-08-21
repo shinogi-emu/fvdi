@@ -29,6 +29,63 @@
  * - some compilers can't deal well with *var++ constructs
  */
 
+
+/*
+ * Solid horizontal run of one colour.
+ *
+ * This is the hottest loop in the driver, and not only because of
+ * rectangle fills: engine/draw.s _hline clips a horizontal line and then
+ * calls straight into the driver's fill with a one-pixel-high rectangle,
+ * and engine/line.c drives circle and polygon scanlines through the same
+ * hline.  So every box border, window frame, underline, separator,
+ * circle and filled polygon on the screen arrives here.
+ *
+ * Pixels are 16 bits, so they go two at a time as longs.  The odd
+ * leading pixel is written on its own first: it costs one store and it
+ * means every store after it is long-aligned, which matters more than
+ * the store it saves.  The body is unrolled eight longs deep to keep
+ * loop overhead off the critical path.
+ */
+static void solid_run(PIXEL **addrp, int n, PIXEL colour)
+{
+    PIXEL *d = *addrp;
+    unsigned long pair;
+    unsigned long *q;
+    int pairs;
+
+    if (n <= 0)
+        return;
+
+    if ((long)d & 2)
+    {
+        *d++ = colour;
+        if (--n == 0)
+        {
+            *addrp = d;
+            return;
+        }
+    }
+
+    pair = ((unsigned long)(unsigned short)colour << 16) |
+            (unsigned short)colour;
+    q = (unsigned long *)d;
+
+    for (pairs = n >> 1; pairs >= 8; pairs -= 8)
+    {
+        q[0] = pair; q[1] = pair; q[2] = pair; q[3] = pair;
+        q[4] = pair; q[5] = pair; q[6] = pair; q[7] = pair;
+        q += 8;
+    }
+    while (pairs-- > 0)
+        *q++ = pair;
+
+    d = (PIXEL *)q;
+    if (n & 1)
+        *d++ = colour;
+
+    *addrp = d;
+}
+
 #ifdef BOTH
 static void s_fill_replace(PIXEL *addr, PIXEL *addr_fast, int line_add, short *pattern, int x, int y, int w, int h, PIXEL foreground, PIXEL background)
 {
@@ -47,14 +104,11 @@ static void s_fill_replace(PIXEL *addr, PIXEL *addr_fast, int line_add, short *p
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0xffff:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                *addr_fast = foreground;
-                addr_fast++;
+            solid_run(&addr_fast, w, foreground);
 #endif
-                *addr = foreground;
-                addr++;
-            }
+            solid_run(&addr, w, foreground);
+            (void) j;
             break;
         default:
             mask = x;
@@ -291,14 +345,11 @@ static void fill_replace(PIXEL *addr, PIXEL *addr_fast, int line_add, short *pat
         pattern_word = pattern[i & 0x000f];
         switch (pattern_word) {
         case 0xffff:
-            for(j = w - 1; j >= 0; j--) {
 #ifdef BOTH
-                *addr_fast = foreground;
-                addr_fast++;
+            solid_run(&addr_fast, w, foreground);
 #endif
-                *addr = foreground;
-                addr++;
-            }
+            solid_run(&addr, w, foreground);
+            (void) j;
             break;
         default:
             mask = x;
