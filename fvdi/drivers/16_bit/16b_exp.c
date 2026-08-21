@@ -44,6 +44,15 @@
  * because a pair can straddle a word boundary and the run can start at
  * any bit.
  *
+ * The tables are the caller's.  They depend only on the two colours, so
+ * they are the same for every row of the run, and building them here made
+ * them cost per row: they are address-taken arrays indexed by a variable,
+ * which is exactly what a compiler cannot hold in registers, so each call
+ * rebuilt them in a fresh frame.  Text arrives one glyph per call - a
+ * dozen rows of a handful of pixels each - and at that size the per-row
+ * setup was more than half the work, which is why a faster inner loop on
+ * its own changed nothing.
+ *
  * SOURCE ADVANCE IS LOAD-BEARING.  The original reads one word up front
  * and one more every time the mask wraps, which is 1 + ((bit + w) >> 4)
  * words, and the caller's row stride assumes exactly that.  This
@@ -51,23 +60,14 @@
  * even though this reads words on a different schedule.
  */
 static void expand_row_replace(PIXEL *dst, const short *src, int bit, int n,
-                               PIXEL foreground, PIXEL background)
+                               const unsigned long *pair, const PIXEL *fgbg)
 {
-    unsigned long pair[4];
-    PIXEL fgbg[2];
     unsigned long acc;
     unsigned long *q;
     int avail, k;
 
     if (n <= 0)
         return;
-
-    fgbg[0] = background;
-    fgbg[1] = foreground;
-    pair[0] = ((unsigned long)(unsigned short)background << 16) | (unsigned short)background;
-    pair[1] = ((unsigned long)(unsigned short)background << 16) | (unsigned short)foreground;
-    pair[2] = ((unsigned long)(unsigned short)foreground << 16) | (unsigned short)background;
-    pair[3] = ((unsigned long)(unsigned short)foreground << 16) | (unsigned short)foreground;
 
     /* Prime the accumulator so the next pixel's bit is the top bit. */
     acc = (unsigned long)(unsigned short)*src++ << 16;
@@ -280,11 +280,22 @@ static void replace(short *src_addr, int src_line_add, PIXEL *dst_addr, PIXEL *d
     /* Words the bit-at-a-time version would have read for this run: one
      * up front, plus one per mask wrap.  The row stride depends on it. */
     int words = 1 + ((bit + w) >> 4);
+    /* Pixel pairs indexed by two source bits, and single pixels indexed by
+     * one.  Built here rather than per row - see expand_row_replace. */
+    unsigned long pair[4];
+    PIXEL fgbg[2];
 
     (void) dst_addr_fast;
 
+    fgbg[0] = background;
+    fgbg[1] = foreground;
+    pair[0] = ((unsigned long)(unsigned short)background << 16) | (unsigned short)background;
+    pair[1] = ((unsigned long)(unsigned short)background << 16) | (unsigned short)foreground;
+    pair[2] = ((unsigned long)(unsigned short)foreground << 16) | (unsigned short)background;
+    pair[3] = ((unsigned long)(unsigned short)foreground << 16) | (unsigned short)foreground;
+
     for(i = h - 1; i >= 0; i--) {
-        expand_row_replace(dst_addr, src_addr, bit, w, foreground, background);
+        expand_row_replace(dst_addr, src_addr, bit, w, pair, fgbg);
         src_addr += words + src_line_add;
         dst_addr += w + dst_line_add;
     }
