@@ -1062,27 +1062,36 @@ long CDECL c_expand_area(Virtual *vwk, MFDB *src, long src_x, long src_y,
 
 long CDECL c_read_pixel(Virtual *vwk, MFDB *mfdb, long x, long y)
 {
-    MFDB dst;
-    short pixel[8], *ptr;
-    int colour, i;
+    const MFDB *source = mfdb && mfdb->address && mfdb->address != vwk->real_address->screen.mfdb.address ?
+                         mfdb : &vwk->real_address->screen.mfdb;
+    const unsigned short *pixels = (const unsigned short *)source->address;
+    unsigned short mask;
+    long stride, step, colour = 0, i;
 
-    dst.address = pixel;
-    dst.width = 16;
-    dst.height = 1;
-    dst.wdwidth = 1;
-    dst.standard = 0;
-    dst.bitplanes = mfdb->bitplanes;
+    if (!pixels || ((unsigned long)pixels & 1) || source->bitplanes < 1 || source->bitplanes > 8 ||
+        x < 0 || y < 0 || x >= source->width || y >= source->height)
+        return 0;
 
-    /* Fetch one pixel in D=S mode */
-    c_blit_area(vwk, mfdb, x, y, &dst, 15, 0, 1, 1, 3);
-
-    colour = 0;
-    ptr = pixel;
-    for (i = mfdb->bitplanes - 1; i >= 0; --i)
+    /* Read the plane words directly; a one-pixel query needs no blit setup or
+     * temporary MFDB. Respect screen stride and standard separated planes.
+     */
+    if (source == &vwk->real_address->screen.mfdb)
     {
-        colour *= 2;
-        colour += *ptr++ & 1;
+        stride = vwk->real_address->screen.wrap / 2;
+        pixels += y * stride + x / 16 * source->bitplanes;
+        step = 1;
+    } else if (source->standard)
+    {
+        pixels += y * source->wdwidth + x / 16;
+        step = (long)source->height * source->wdwidth;
+    } else
+    {
+        pixels += (y * source->wdwidth + x / 16) * source->bitplanes;
+        step = 1;
     }
+    mask = 0x8000U >> (x & 15);
+    for (i = 0; i < source->bitplanes; i++)
+        if (pixels[i * step] & mask) colour |= 1L << i;
 
     return colour;
 }

@@ -77,9 +77,19 @@ void reset_interrupts(void);
 int lib_vst_font(Virtual *vwk, long fontID);
 int lib_vst_point(Virtual *vwk, long height, short *charw, short *charh, short *cellw, short *cellh);
 void lib_vrt_cpyfm_nocheck(Virtual *vwk, short mode, short *pxy, MFDB *src, MFDB *dst, short colors[]);
+void lib_vrt_cpyfm(Virtual *vwk, short mode, short *pxy, MFDB *src, MFDB *dst, short colors[]);
+long CDECL ctab_index_to_vdi(Virtual *, long);
 void lib_vro_cpyfm(Virtual *vwk, short mode, short *pxy, MFDB *src, MFDB *dst);
 void lib_vs_clip(Virtual *, short, short *);
 void lib_vr_trnfm(Virtual *, MFDB *, MFDB *);
+int CDECL transfer_rgb16(Virtual *, const GCBITMAP *, GCBITMAP *,
+                         const RECT16 *, const RECT16 *, long);
+int CDECL transfer_index8(Virtual *, const GCBITMAP *, GCBITMAP *,
+                          const RECT16 *, const RECT16 *, long);
+void itab_close(Virtual *);
+void ctab_close(Virtual *);
+void CDECL legacy_vro_scale(Virtual *, const void *);
+void CDECL legacy_vrt_scale(Virtual *, const void *);
 void opnvwk_values(Virtual *, VDIpars *);
 void CDECL lib_v_bez(Virtual *vwk, struct v_bez_pars *par);
 long lib_vst_load_fonts(Virtual *vwk, long select);

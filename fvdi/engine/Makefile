@@ -84,6 +84,10 @@ CSRC = \
 	textlib.c \
 	calamus.c \
 	bconout.c \
+	transfer.c \
+	itable.c \
+	ctab.c \
+	legacy_raster.c \
 	default.c
 
 CSRC += \

@@ -8,7 +8,6 @@
  * It's not copyrighted or under any sort of license.
  */
 #include "fvdi.h"
-#include "driver.h"
 
 short default_vdi_colors[256][3] = {
 	{ 1000,1000,1000 },

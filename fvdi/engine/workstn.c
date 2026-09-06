@@ -480,6 +480,8 @@ void CDECL v_clsvwk(Virtual *vwk, VDIpars *pars)
 
     if (vwk->text.current_font)
         vwk->text.current_font->extra.ref_count--; /* Allow the font to be freed if appropriate */
+    itab_close(vwk);
+    ctab_close(vwk);
     free(vwk);	/* This will work for off-screen bitmaps too, fortunately */
 
     /* Reset VDI structure address to default */
