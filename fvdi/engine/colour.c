@@ -11,6 +11,8 @@
 #include "function.h"
 #include "relocate.h"
 #include "utility.h"
+#include "ctab.h"
+#include "itable.h"
 
 #define neg_pal_n  9
 
@@ -31,21 +33,21 @@ static Colour *get_clut(Virtual *vwk)
         addr = malloc((wk->screen.palette.size + neg_pal_n) * sizeof(Colour));
         if (!addr)
         {
-            /* If no memory for local palette, */
-            palette = wk->screen.palette.colours;   /*  modify in global (BAD!) */
             PUTS("Could not allocate space for palette!\n");
+            return 0;
         } else
         {
             if (!palette)
             {
                 /* No palette allocated? */
                 palette = vwk->palette = (Colour *)(addr + neg_pal_n * sizeof(Colour));   /* Point to index 0 */
+                memset(addr, 0, neg_pal_n * sizeof(Colour));
             } else
             {                           /* Only negative palette allocated so far? */
                 palette = (Colour *)((long)palette & ~1);  /* Copy the negative side first and free it */
                 vwk->palette = (Colour *)(addr + neg_pal_n * sizeof(Colour));
                 copymem_aligned(palette - neg_pal_n, addr, neg_pal_n * sizeof(Colour));
-                free(palette);
+                free(palette - neg_pal_n);
                 palette = vwk->palette;
             }
             copymem_aligned(wk->screen.palette.colours, palette, wk->screen.palette.size * sizeof(Colour));
@@ -62,10 +64,12 @@ void CDECL lib_vs_color(Virtual *vwk, long pen, RGB *values)
     Colour *palette;
     DrvPalette palette_pars;
 
-    if (pen >= wk->screen.palette.size)
+    if (pen < 0 || pen >= wk->screen.palette.size)
         return;
 
     palette = get_clut(vwk);
+    if (!palette)
+        return;
 
     palette_pars.first_pen = pen;
     palette_pars.count = 1;             /* One colour to set up */
@@ -124,6 +128,11 @@ static int vdi2idx(Workstation *wk, int vdi_pen)
     }
 
     return ret;
+}
+
+long CDECL ctab_index_to_vdi(Virtual *vwk, long index)
+{
+    return index < 0 || index > 255 ? -1 : idx2vdi(vwk->real_address, index);
 }
 
 
@@ -334,10 +343,13 @@ int CDECL colour_entry(Virtual *vwk, long subfunction, short *intin, short *into
         return 6;
 
     case 3:     /* vq_px_format */
-        PUTS("vq_px_format not yet supported\n");
-        *(long *)&intout[0] = 1;
-        *(long *)&intout[2] = 0x03421820L;
-        return 4;
+        {
+            unsigned long format = ctab_pixel_format(vwk);
+            long space = format ? 1 : 0;
+            memcpy(intout, &space, sizeof(space));
+            memcpy(intout + 2, &format, sizeof(format));
+            return 4;
+        }
 
     default:
         PUTS("Unknown colour entry operation\n");
@@ -352,10 +364,14 @@ static int set_col_table(Virtual *vwk, long count, long start, COLOR_ENTRY *valu
     Colour *palette;
     DrvPalette palette_pars;
 
-    if (start + count > wk->screen.palette.size)
+    if (start < 0 || count <= 0 || start >= wk->screen.palette.size)
+        return 0;
+    if (count > wk->screen.palette.size - start)
         count = wk->screen.palette.size - start;
 
     palette = get_clut(vwk);
+    if (!palette)
+        return 0;
 
     palette_pars.first_pen = start;
     palette_pars.count = count;
@@ -376,15 +392,26 @@ int CDECL set_colour_table(Virtual *vwk, long subfunction, short *intin)
     {
     case 0:     /* vs_ctab */
         ctab = (COLOR_TAB *)intin;
+        if (!itab_valid_palette(ctab))
+            return 0;
         return set_col_table(vwk, ctab->no_colors, 0, ctab->colors);
 
     case 1:     /* vs_ctab_entry */
-        PUTS("vs_ctab_entry not yet supported\n");
-        return 1;      /* Seems to be the only possible value for non-failure */
+        {
+            long space;
+            memcpy(&space, intin + 1, sizeof(space));
+            if (space != 0 && space != 1)
+                return 0;
+            return set_col_table(vwk, 1, intin[0], (COLOR_ENTRY *)(intin + 3));
+        }
 
     case 2:     /* vs_dflt_ctab */
-        PUTS("vs_dflt_ctab not yet supported\n");
-        return 256;    /* Not really correct */
+        {
+            COLOR_TAB defaults;
+            if (!ctab_default(&defaults, vwk->real_address->screen.mfdb.bitplanes))
+                return 0;
+            return set_col_table(vwk, defaults.no_colors, 0, defaults.colors);
+        }
 
     default:
         PUTS("Unknown set colour table operation\n");
@@ -399,66 +426,36 @@ int CDECL colour_table(Virtual *vwk, long subfunction, short *intin, short *into
     {
     case 0:     /* vq_ctab */
         {
-            COLOR_TAB *ctab = (COLOR_TAB *)&intout[0];
-            int i;
-            Workstation *wk = vwk->real_address;
-            long ctab_length = *(long *) &intin[0];
-            long length = 48 /* sizeof(COLOR_TAB) */ + wk->screen.palette.size * sizeof(COLOR_ENTRY);
-            Colour *palette = vwk->palette;
-
-            /* Negative indices are always in local palette, but this can't be one of those */
-            if (!palette || ((long)palette & 1))
-                palette = wk->screen.palette.colours;
-
-            PUTS("vq_ctab not yet really supported\n");
-            if (length > ctab_length)
-            {
-                PRINTF(("Too little space available for ctab (%ld when ctab needs %ld)!\n", *(long *) &intin[0], length));
+            long capacity, length = ctab_bytes(vwk->real_address->screen.palette.size);
+            const COLOR_TAB *table;
+            memcpy(&capacity, intin, sizeof(capacity));
+            if (!length || capacity < length || !(table = ctab_current(vwk)))
                 return 0;
-            }
-            ctab->magic = 0x63746162L; /* 'ctab' */
-            ctab->length = length;
-            ctab->format = 0;
-            ctab->reserved = 0;
-            ctab->map_id = 0xbadc0de1L;
-            ctab->color_space = 1;
-            ctab->flags = 0;
-            ctab->no_colors = 256;
-            ctab->reserved1 = 0;
-            ctab->reserved2 = 0;
-            ctab->reserved3 = 0;
-            ctab->reserved4 = 0;
-
-            for (i = 0; i < wk->screen.palette.size; i++)
-            {
-                ctab->colors[i].rgb.red = (palette[i].vdi.red * 255L) / 1000;
-                ctab->colors[i].rgb.green = (palette[i].vdi.green * 255L) / 1000;
-                ctab->colors[i].rgb.blue = (palette[i].vdi.blue * 255L) / 1000;
-                ctab->colors[i].rgb.red |= ctab->colors[i].rgb.red << 8;
-                ctab->colors[i].rgb.green |= ctab->colors[i].rgb.green << 8;
-                ctab->colors[i].rgb.blue |= ctab->colors[i].rgb.blue << 8;
-                PRINTF(("[%d] = %04x,%04x,%04x  %04x,%04x,%04x  %04x,%04x,%04x\n", i,
-                    ctab->colors[i].rgb.red & 0xffff,
-                    ctab->colors[i].rgb.green & 0xffff,
-                    ctab->colors[i].rgb.blue & 0xffff,
-                    palette[i].vdi.red & 0xffff,
-                    palette[i].vdi.green & 0xffff,
-                    palette[i].vdi.blue & 0xffff,
-                    palette[i].hw.red & 0xffff,
-                    palette[i].hw.green & 0xffff,
-                    palette[i].hw.blue & 0xffff));
-            }
-            return (int)(length / 2);
+            memcpy(intout, table, length);
+            return length / 2;
         }
 
     case 1:     /* vq_ctab_entry */
-        PUTS("vq_ctab_entry not yet supported\n");
-        return 6;
+        {
+            const COLOR_TAB *table = ctab_current(vwk);
+            long space = 0;
+            memset(intout, 0, 12);
+            if (table && intin[0] >= 0 && intin[0] < table->no_colors)
+            {
+                space = 1;
+                memcpy(intout + 2, &table->colors[intin[0]], sizeof(COLOR_ENTRY));
+            }
+            memcpy(intout, &space, sizeof(space));
+            return 6;
+        }
 
     case 2:     /* vq_ctab_id */
-        PUTS("vq_ctab_id not yet supported\n");
-        *(long *)&intout[0] = 0xbadc0de1L;   /* Not really correct */
-        return 2;
+        {
+            const COLOR_TAB *table = ctab_current(vwk);
+            long id = table ? table->map_id : 0;
+            memcpy(intout, &id, sizeof(id));
+            return 2;
+        }
 
     case 3:     /* v_ctab_idx2vdi */
         intout[0] = idx2vdi(vwk->real_address, intin[0]);
@@ -469,56 +466,72 @@ int CDECL colour_table(Virtual *vwk, long subfunction, short *intin, short *into
         return 1;
 
     case 5:     /* v_ctab_idx2value */
-        PUTS("v_ctab_idx2value not yet supported\n");
-        return 2;
-
-    case 6:     /* v_get_ctab_id */
-        PUTS("v_get_ctab_id not yet supported\n");
-        *(long *)&intout[0] = 0xbadc0de1L;   /* Should always be different */
-        return 2;
-
-    case 7:     /* vq_dflt_ctab */
-        PUTS("vq_dflt_ctan not yet supported\n");
-        return 256;    /* Depending on palette size */
-
-    case 8:     /* v_create_ctab */
-        PUTS("v_create_ctab not yet supported\n");
-        return 2;
-
-    case 9:     /* v_delete_ctab */
-        PUTS("v_delete_ctab not yet supported\n");
-        intout[0] = 1;   /* OK */
-        return 1;
-
-    default:
-        PUTS("Unknown colour table operation\n");
-        return 0;
-    }
-}
-
-
-int CDECL inverse_table(Virtual *vwk, long subfunction, short *intin, short *intout)
-{
-    (void) vwk;
-    (void) intin;
-    switch ((int) subfunction)
-    {
-    case 0:     /* v_create_itab */
         {
-            /* COLOR_TAB *ctab = (COLOR_TAB *) *(long *)&intin[0]; */
-
-            PUTS("v_create_itab not yet supported\n");
-            *(long *)&intout[0] = 0xbadc0de1L;
+            Workstation *wk = vwk->real_address;
+            Colour *palette = vwk->palette;
+            long index = intin[0];
+            unsigned long value = 0;
+            if (index < 0 || index >= wk->screen.palette.size)
+                index = vdi2idx(wk, 1);
+            if (wk->driver->device->clut == 1)
+                value = index < 0 ? 0 : index;
+            else
+            {
+                if (!palette || ((unsigned long)palette & 1)) palette = wk->screen.palette.colours;
+                if (palette && index >= 0)
+                {
+                    if (wk->screen.mfdb.bitplanes <= 16)
+                    {
+                        unsigned short pixel;
+                        memcpy(&pixel, &palette[index].real, sizeof(pixel));
+                        value = pixel;
+                    }
+                    else value = palette[index].real;
+                }
+            }
+            memcpy(intout, &value, sizeof(value));
             return 2;
         }
 
-    case 1:     /* v_delete_itab */
-        PUTS("v_delete_itab not yet supported\n");
-        intout[0] = 1;   /* OK */
-        return 1;
+    case 6:     /* v_get_ctab_id */
+        {
+            long id = ctab_new_id();
+            memcpy(intout, &id, sizeof(id));
+            return 2;
+        }
+
+    case 7:     /* vq_dflt_ctab */
+        {
+            long capacity, bits = vwk->real_address->screen.mfdb.bitplanes;
+            long length = ctab_bytes(bits > 8 ? 256 : bits > 0 ? 1L << bits : 0);
+            memcpy(&capacity, intin, sizeof(capacity));
+            if (!length || capacity < length || !ctab_default((COLOR_TAB *)intout, bits))
+                return 0;
+            return length / 2;
+        }
+
+    case 8:     /* v_create_ctab */
+        {
+            long space;
+            unsigned long format;
+            COLOR_TAB *table;
+            memcpy(&space, intin, sizeof(space));
+            memcpy(&format, intin + 2, sizeof(format));
+            table = ctab_create(vwk, space, format);
+            memcpy(intout, &table, sizeof(table));
+            return 2;
+        }
+
+    case 9:     /* v_delete_ctab */
+        {
+            COLOR_TAB *table;
+            memcpy(&table, intin, sizeof(table));
+            intout[0] = ctab_delete(vwk, table);
+            return 1;
+        }
 
     default:
-        PUTS("Unknown inverse colour table operation\n");
+        PUTS("Unknown colour table operation\n");
         return 0;
     }
 }

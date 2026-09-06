@@ -18,6 +18,9 @@ transparent	equ	1		; Fall through?
 	xref	_default_line
 	xref	_vr_transfer_bits,_colour_entry
 	xref	_set_colour_table,_colour_table,_inverse_table
+	xref	_legacy_vro_scale,_legacy_vrt_scale
+	xref	_ctab_index_to_vdi
+	xref	_vdi_stack_top,_vdi_stack_size
 
 	xdef	v_bar,vr_recfl,vrt_cpyfm,vro_cpyfm
 	xdef	vr_trnfm
@@ -57,7 +60,7 @@ v_get_pixel:
 	done_return			; Should be real_return
 
 * lib_v_get_pixel - Standard Library function
-* Todo: Convert when in bitplane modes
+* Returns both packed pixel value and VDI pen in indexed modes.
 * In:   a1      Parameters   lib_v_get_pixel(x, y, &colour, &index)
 *       a0      VDI struct
 lib_v_get_pixel:
@@ -93,7 +96,14 @@ lib_v_get_pixel:
 	rts
 
 .convert_to_index:
-	moveq	#-1,d0			; This should of course convert!
+	move.l	(a1)+,a2
+	movem.l	a0/a2,-(a7)
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_ctab_index_to_vdi
+	addq.l	#8,a7
+	movem.l	(a7)+,a0/a2
+	move.w	d0,(a2)
 	bra	.end_lib_v_get_pixel
 
 
@@ -492,6 +502,18 @@ vrt_cpyfm:
 *       a0      VDI struct
 _lib_vrt_cpyfm:
 lib_vrt_cpyfm:
+	tst.w	(a1)
+	bpl	.unscaled_vrt
+	movem.l	d0-d2/a0-a2,-(a7)
+	move.l	a1,-(a7)
+	move.l	a0,-(a7)
+	moveq	#8,d2
+	lea	_legacy_vrt_scale,a2
+	bsr	raster_call
+	addq.l	#8,a7
+	movem.l	(a7)+,d0-d2/a0-a2
+	rts
+.unscaled_vrt:
 	move.l	14(a1),a2
 	move.l	(a2),d0		; Background colour (top word)
 	swap	d0		; Foreground colour (bottom word)
@@ -713,6 +735,18 @@ vro_cpyfm:
 *       a0      VDI struct
 _lib_vro_cpyfm:
 lib_vro_cpyfm:
+	tst.w	(a1)
+	bpl	.unscaled_vro
+	movem.l	d0-d2/a0-a2,-(a7)
+	move.l	a1,-(a7)
+	move.l	a0,-(a7)
+	moveq	#8,d2
+	lea	_legacy_vro_scale,a2
+	bsr	raster_call
+	addq.l	#8,a7
+	movem.l	(a7)+,d0-d2/a0-a2
+	rts
+.unscaled_vro:
 	uses_d1
 	movem.l	d2-d5/a3-a5,-(a7)
 
@@ -848,6 +882,35 @@ _default_blit:
 	rts
 
 
+* Run raster/palette C work on fVDI's existing 8K VDI stack. EmuTOS's
+* supervisor stack is only 2K; indexed palette/filter/blit frames exceed it.
+* In: a2 = C function, d2 = argument bytes (caller has saved d2).
+* Arguments follow our return address. A nested call already on this stack
+* must keep its current stack pointer, not overwrite the outer frame.
+raster_call:
+	move.l	a7,d0
+	move.l	_vdi_stack_top,a0
+	cmp.l	a0,d0
+	bhs	.switch_raster_stack
+	sub.l	_vdi_stack_size,a0
+	cmp.l	a0,d0
+	blo	.switch_raster_stack
+	jmp	(a2)
+.switch_raster_stack:
+	move.l	a7,a1
+	move.l	_vdi_stack_top,a7
+	move.l	a1,-(a7)
+	move.l	d2,d0
+	lea	4(a1,d0.l),a0
+.copy_raster_args:
+	move.l	-(a0),-(a7)
+	subq.w	#4,d0
+	bne	.copy_raster_args
+	jsr	(a2)
+	add.l	d2,a7
+	move.l	(a7),a7
+	rts
+
 * vr_transfer_bits - Standard Trap function
 * Todo: ?
 * In:   a1      Parameter block
@@ -867,7 +930,9 @@ vr_transfer_bits:
 	move.l	18(a2),-(a7)
 	move.l	14(a2),-(a7)
 	move.l	a0,-(a7)
-	jsr	_vr_transfer_bits
+	moveq	#24,d2
+	lea	_vr_transfer_bits,a2
+	bsr	raster_call
 	add.w	#24,a7
 
 	move.l	(a7)+,d2
@@ -914,7 +979,9 @@ set_colour_table:
 	move.w	subfunction(a2),d0
 	move.l	d0,-(a7)
 	move.l	a0,-(a7)
-	jsr	_set_colour_table
+	moveq	#12,d2
+	lea	_set_colour_table,a2
+	bsr	raster_call
 	add.w	#12,a7
 
 	movem.l	(a7)+,d2/a1

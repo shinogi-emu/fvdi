@@ -106,6 +106,13 @@ void CDECL vr_transfer_bits(Virtual *vwk, GCBITMAP *src_bm, GCBITMAP *dst_bm, RE
 {
     int error = 0;
 
+    if (!src_rect || !dst_rect)
+        return;
+    if (transfer_rgb16(vwk, src_bm, dst_bm, src_rect, dst_rect, mode))
+        return;
+    if (transfer_index8(vwk, src_bm, dst_bm, src_rect, dst_rect, mode))
+        return;
+
     do
     {
         if ((src_rect->x2 - src_rect->x1 != dst_rect->x2 - dst_rect->x1) ||
