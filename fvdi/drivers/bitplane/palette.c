@@ -58,10 +58,18 @@ void CDECL x_get_colours(Workstation *wk, long colour, short *foreground, short 
 }
 
 
+/*
+ * The _VDO cookie, read once by initialize().  That runs in user mode,
+ * where reading the cookie jar directly is a bus error on a TT or Falcon,
+ * so it goes through the protected read there; a trap call already runs
+ * in supervisor mode.
+ */
+long vdo_cookie = -2;
+
 void CDECL c_set_colours(Virtual *vwk, long start, long entries, unsigned short *requested, Colour palette[])
 {
     Workstation *wk = vwk->real_address;
-    long video = access->funcs.get_cookie("_VDO", 1);
+    long video;
     long i, count = wk->screen.palette.size;
     int extended = (unsigned long)requested & 1;
 
@@ -70,7 +78,9 @@ void CDECL c_set_colours(Virtual *vwk, long start, long entries, unsigned short 
     if (entries > count - start)
         entries = count - start;
     requested = (unsigned short *)((unsigned long)requested & ~1UL);
-    video = video < 0 ? 0 : video >> 16;
+    if (vdo_cookie == -2)
+        vdo_cookie = access->funcs.get_cookie("_VDO", 1);
+    video = vdo_cookie < 0 ? 0 : vdo_cookie >> 16;
     /* This fallback is for Atari planar video. Do not probe unrelated hardware. */
     if (video > 3)
         return;
