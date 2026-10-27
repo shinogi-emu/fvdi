@@ -40,7 +40,7 @@ long vq_px_format(short handle, unsigned long *px_format);
 void v_opnbm(short *work_in, MFDB *bitmap, short *handle, short *work_out);
 void v_clsbm(short handle);
 
-static int failed;
+static int failed, skipped;
 static short screen;
 static short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 };
 static short work_out[57];
@@ -120,9 +120,13 @@ int main(void)
     snprintf(line, sizeof(line), "BITMAPS screen planes %d", work_out[4]);
     say(line);
     planes = work_out[4];
-    check(planes >= 16, "screen is 16 bits or deeper");
-    if (failed)
+    if (planes < 16)
+    {
+        /* The pixel checks below read 16-bit pixels */
+        say("BITMAPS screen under 16 bits: skipped");
+        skipped = 1;
         goto out;
+    }
     space = vq_px_format(screen, &px_format);
     snprintf(line, sizeof(line), "BITMAPS colour space %ld, px_format %08lx", space, px_format);
     say(line);
@@ -255,6 +259,6 @@ out:
         v_clsvwk(screen);
     appl_exit();
     if (!failed)
-        say("FVDI BITMAPS GUEST PASS");
+        say(skipped ? "FVDI BITMAPS GUEST SKIPPED" : "FVDI BITMAPS GUEST PASS");
     return failed;
 }

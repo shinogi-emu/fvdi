@@ -142,8 +142,23 @@ int main(void)
     vqf_fg_color(handle, &c);
     snprintf(line, sizeof(line), "NVDIMISC fill after v_setrgb: %04x %04x %04x", c.red, c.green, c.blue);
     say(line);
-    check(c.red == 0xffff && c.green == 0 && c.blue >= 0x7f00 && c.blue <= 0x8100,
-          "v_setrgb sets the fill colour");
+    vq_extnd(handle, 1, work_out);
+    if (work_out[4] >= 16)
+        check(c.red == 0xffff && c.green == 0 && c.blue >= 0x7f00 && c.blue <= 0x8100,
+              "v_setrgb sets the fill colour");
+    else
+    {
+        /* A screen with a colour table gives the nearest pen it has */
+        n.reserved = 0;
+        n.red = 0xffff;
+        n.green = 0;
+        n.blue = 0x8000;
+        v_color2nearest(handle, 1, &n, &n2);
+        snprintf(line, sizeof(line), "NVDIMISC nearest pen %04x %04x %04x", n2.red, n2.green, n2.blue);
+        say(line);
+        check(c.red == n2.red && c.green == n2.green && c.blue == n2.blue,
+              "v_setrgb sets the fill colour to the nearest pen");
+    }
 
     /* vr_clip_rects, 16 bits */
     {

@@ -85,6 +85,23 @@ static long get_colour(short handle, short opcode, short sub,
     return ((long) intout[0] << 16) | (unsigned short) intout[1];
 }
 
+/* v_color2nearest (204/2): the colour the screen really has nearest r,g,b */
+static void nearest(short handle, unsigned short r, unsigned short g, unsigned short b,
+                    unsigned short *nr, unsigned short *ng, unsigned short *nb)
+{
+    intin[0] = 0;
+    intin[1] = 1;
+    intin[2] = 0;
+    intin[3] = (short) r;
+    intin[4] = (short) g;
+    intin[5] = (short) b;
+    intout[3] = intout[4] = intout[5] = 0x7777;
+    vdi_raw(handle, 204, 2, 6);
+    *nr = (unsigned short) intout[3];
+    *ng = (unsigned short) intout[4];
+    *nb = (unsigned short) intout[5];
+}
+
 static short open_vwk(void)
 {
     short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 };
@@ -115,6 +132,7 @@ int main(void)
     char what[80];
     short h, h2, sub;
     unsigned short r1, g1, b1, r2, g2, b2;
+    short work_out[57], palette_screen;
 
     say("COLORS start");
     check(appl_init() >= 0, "AES application registration");
@@ -182,14 +200,44 @@ int main(void)
      * not the palette's 0-1000.  The palette keeps a component to a
      * thousandth, so a value comes back within one step of what was set.
      */
+    vq_extnd(h, 1, work_out);
+    palette_screen = work_out[4] < 16;
     check(set_colour(h, 200, 1, 1, 0xffff, 0, 0) == 1, "vsf_fg_color full red");
-    check(is_rgb(h, 202, 1, 0xffff, 0, 0), "vqf_fg_color reads full red as ffff");
+    if (palette_screen)
+    {
+        nearest(h, 0xffff, 0, 0, &r2, &g2, &b2);
+        check(is_rgb(h, 202, 1, r2, g2, b2), "vqf_fg_color reads full red as the nearest pen");
+    } else
+        check(is_rgb(h, 202, 1, 0xffff, 0, 0), "vqf_fg_color reads full red as ffff");
     check(set_colour(h, 201, 0, 1, 0, 0x8000, 0xffff) == 1, "vst_bg_color half green, full blue");
     get_colour(h, 203, 0, &r1, &g1, &b1);
     snprintf(what, sizeof(what), "COLORS text bg reads %04x %04x %04x", r1, g1, b1);
     say(what);
-    check(r1 == 0 && g1 >= 0x8000 - 66 && g1 <= 0x8000 + 66 && b1 == 0xffff,
-          "vqt_bg_color reads back within one palette step");
+    {
+        if (!palette_screen)
+            check(r1 == 0 && g1 >= 0x8000 - 66 && g1 <= 0x8000 + 66 && b1 == 0xffff,
+                  "vqt_bg_color reads back within one palette step");
+        else
+        {
+            /*
+             * A screen with a colour table has no pen to spare for an RGB
+             * colour; it gets the nearest pen there is, and the query says
+             * which colour that is.
+             */
+            nearest(h, 0, 0x8000, 0xffff, &r2, &g2, &b2);
+            snprintf(what, sizeof(what), "COLORS %d planes: nearest pen is %04x %04x %04x",
+                     work_out[4], r2, g2, b2);
+            say(what);
+            check(r1 == r2 && g1 == g2 && b1 == b2,
+                  "vqt_bg_color reads back the nearest colour the screen has");
+        }
+    }
+
+    /* A pen chosen by number reads back as that pen's colour */
+    vsf_color(h, 1);
+    check(is_rgb(h, 202, 1, 0, 0, 0), "vsf_color 1 reads back black");
+    vsf_color(h, 0);
+    check(is_rgb(h, 202, 1, 0xffff, 0xffff, 0xffff), "vsf_color 0 reads back white");
 
 out:
     if (h > 0)
