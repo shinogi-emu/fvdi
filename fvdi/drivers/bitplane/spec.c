@@ -222,6 +222,19 @@ long initialize(Virtual *vwk)
     }
     setup_scrninfo(me->device, graphics_mode);
 
+    /*
+     * Started from AUTO there is no VDI before this one to copy colours
+     * from, and nothing else filled the palette table: vq_color and every
+     * other colour query read whatever the allocation held.  Set the VDI's
+     * default colours, or those of a palette file, as the other drivers do
+     * and as a VDI does when its workstation opens.
+     */
+    vdo_cookie = access->funcs.get_cookie("_VDO", 0);
+    if (loaded_palette)
+        access->funcs.copymem(loaded_palette, default_vdi_colors, 256 * 3 * sizeof(short));
+    if (wk->screen.palette.colours)
+        c_initialize_palette(vwk, 0, wk->screen.palette.size, default_vdi_colors, wk->screen.palette.colours);
+
     PRINTF(("%dx%dx%d screen at %08lx\n", wk->screen.mfdb.width, wk->screen.mfdb.height, wk->screen.mfdb.bitplanes,
             (long) wk->screen.mfdb.address));
 

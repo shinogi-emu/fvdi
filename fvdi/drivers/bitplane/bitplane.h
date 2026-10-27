@@ -1,5 +1,6 @@
 extern short fix_shape;
 extern short no_restore;
+extern long vdo_cookie;
 
 long CDECL x_get_colour(Workstation *wk, long colour);
 void CDECL x_get_colours(Workstation *wk, long colour, short *foreground, short *background);
