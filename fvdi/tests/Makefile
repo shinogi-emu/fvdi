@@ -24,6 +24,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) nvdimisc_guest.c -lgem -o $(TEST_BUILD)/NVDIMISC.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) outline_guest.c -lgem -o $(TEST_BUILD)/OUTLINE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) vdibench_guest.c -lgem -o $(TEST_BUILD)/VDIBENCH.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
 # A surviving emulator / successful screenshot is not a passing raster test.
