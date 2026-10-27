@@ -1,12 +1,16 @@
-[![Build Status](https://github.com/freemint/fvdi/actions/workflows/build.yml/badge.svg?branch=master)](https://github.com/freemint/fvdi/actions) 
-
-* Latest 000: [no FreeType](https://atari.joska.no/snapshots/fvdi/fvdi-latest-000.zip), [FreeType 2.2.1](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.2.1-000.zip), [2.5.5](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.5.5-000.zip), [2.8.1](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.8.1-000.zip), [2.10.4](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.10.4-000.zip)
-* Latest 020: [no FreeType](https://atari.joska.no/snapshots/fvdi/fvdi-latest-020.zip), [FreeType 2.2.1](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.2.1-020.zip), [2.5.5](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.5.5-020.zip), [2.8.1](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.8.1-020.zip), [2.10.4](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.10.4-020.zip)
-* Latest v4e: [no FreeType](https://atari.joska.no/snapshots/fvdi/fvdi-latest-v4e.zip), [FreeType 2.2.1](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.2.1-v4e.zip), [2.5.5](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.5.5-v4e.zip), [2.8.1](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.8.1-v4e.zip), [2.10.4](https://atari.joska.no/snapshots/fvdi/fvdi-latest-ft2.10.4-v4e.zip)
-* [Archive](https://atari.joska.no/snapshots/fvdi/)
-
 # fvdi
-fVDI fork with additional fixes and drivers.
+The fVDI graphics driver used by [Shinogi](https://github.com/shinogi-emu/shinogi),
+forked from [freemint/fVDI](https://github.com/freemint/fvdi).
+
+## Download
+
+* [fVDI for 68020-68060, with FreeType 2.8.1](https://github.com/shinogi-emu/fvdi/releases/latest/download/fvdi-020-60-ft2.8.1.zip)
+  -- the build Shinogi ships on its drive C
+* [All releases](https://github.com/shinogi-emu/fvdi/releases)
+
+These are this fork's builds. Upstream's own builds are not the same
+program: this fork carries a reworked 16bpp driver, FreeType font fixes and
+NVDI-style raster conversion that upstream does not have.
 
 ## How to build
 ```
@@ -19,3 +23,6 @@ Where `<CPU type>` is one of `v4e` (for ColdFire) or any other m68k-atari-mint
 CPU target (`000` for 68000, `020` for 68020 etc).
 
 To get truetype support: download a [freetype source archive](https://download.savannah.gnu.org/releases/freetype/), untar it somewhere, and create a symlink fvdi/modules/ft2/freetype to the top level directory.
+
+The release above is built with `make CPU=020-60` (one binary for the 68020
+to 68060) and FreeType 2.8.1, using m68k-atari-mint-gcc 4.6.4.
