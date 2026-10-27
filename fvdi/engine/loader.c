@@ -1194,20 +1194,113 @@ long tokenize(const char *buffer)
 }
 
 
-/* This should really be handled somewhat differently. */
-/* Probably ought to be in another file. */
-static void load_font_dir(Virtual *vwk, char *fonts)
+/*
+ * The font folders named by 'fonts =' lines, in order, each with its
+ * trailing backslash.  NVDI's get_font_dir hands these out so that a
+ * program can rescan the same folders without knowing them in advance.
+ */
+#define FONT_DIRS   8
+static char font_dir[FONT_DIRS][PATH_SIZE];
+static long font_dirs = 0;
+
+
+/* Case, and which slash, do not make two paths different files. */
+static int same_path(const char *a, const char *b)
+{
+    char ca, cb;
+
+    do
+    {
+        ca = *a++;
+        cb = *b++;
+        if (ca == '/')
+            ca = '\\';
+        if (cb == '/')
+            cb = '\\';
+        if ((ca >= 'a') && (ca <= 'z'))
+            ca -= 'a' - 'A';
+        if ((cb >= 'a') && (cb <= 'z'))
+            cb -= 'a' - 'A';
+        if (ca != cb)
+            return 0;
+    } while (ca);
+
+    return 1;
+}
+
+
+/*
+ * A rescan only offers FreeType the files that can be fonts.  At boot
+ * every file is tried, and the text files that sit beside the fonts
+ * simply fail; repeating that on every rescan would read each of them
+ * again for nothing.  It also keeps a rescan from passing spdchar.map
+ * back to ft2, which treats that name as a character map to load.
+ */
+static int font_file_name(const char *name)
+{
+    static const char *const ext[] = { "TTF", "OTF", "TTC", "PFB", "PFA" };
+    const char *dot = 0;
+    const char *p;
+    unsigned int i;
+
+    for (p = name; *p; p++)
+    {
+        if (*p == '.')
+            dot = p;
+    }
+    if (!dot)
+        return 0;
+    for (i = 0; i < sizeof(ext) / sizeof(ext[0]); i++)
+    {
+        if (same_path(dot + 1, ext[i]))
+            return 1;
+    }
+
+    return 0;
+}
+
+
+/* Is this file already behind one of the workstation's fonts? */
+static int font_file_loaded(Workstation *wk, const char *path)
+{
+    Fontheader *font, *size;
+
+    for (font = wk->writing.first_font; font; font = font->next)
+    {
+        for (size = font; size; size = size->extra.next_size)
+        {
+            if ((size->flags & FONTF_EXTERNAL) && size->extra.filename &&
+                same_path(size->extra.filename, path))
+                return 1;
+        }
+    }
+
+    return 0;
+}
+
+
+/*
+ * Load every font in a folder tree into the workstation's list, and say
+ * how many were added.
+ *
+ * At boot (rescan = 0) every file is offered to FreeType.  A rescan
+ * offers only font files that no font in the list was loaded from yet,
+ * so running it again, or over a folder inside one already scanned, adds
+ * nothing twice.
+ */
+static long load_font_dir(Virtual *vwk, char *fonts, int rescan)
 {
     _DTA info;
     _DTA *olddta;
     char *pathtail;
     int error;
     long len;
+    long added = 0;
 
     /* Point past the last char */
     len = length(fonts);
     if ((len + 12) > (PATH_SIZE - 2))
-        return;
+        return 0;
     pathtail = &fonts[len];
 
     copy("*.*", pathtail);
@@ -1227,9 +1320,11 @@ static void load_font_dir(Virtual *vwk, char *fonts)
             if (!equal(info.dta_name, ".") && !equal(info.dta_name, ".."))
             {
                 copy("\\", &fonts[length(fonts)]);
-                load_font_dir(vwk, fonts);
+                added += load_font_dir(vwk, fonts, rescan);
             }
-        } else
+        } else if (!rescan ||
+                   (font_file_name(info.dta_name) &&
+                    !font_file_loaded(vwk->real_address, fonts)))
         {
             PRINTF(("   Load font: %s\n", fonts));
 
@@ -1237,7 +1332,10 @@ static void load_font_dir(Virtual *vwk, char *fonts)
             {
                 /* It's assumed that a device has been initialized (driver exists) */
                 if (insert_font(&vwk->real_address->writing.first_font, new_font))
+                {
                     vwk->real_address->writing.fonts++;
+                    added++;
+                }
             } else
             {
                 PRINTF(("!!!failed\n"));
@@ -1247,6 +1345,95 @@ static void load_font_dir(Virtual *vwk, char *fonts)
     }
 
     Fsetdta(olddta);
+
+    return added;
+}
+
+
+/*
+ * NVDI 5's scan_fonts, as far as fVDI honours it.
+ *
+ * NVDI re-walks the folders it is given and rebuilds its font list from
+ * scratch.  fVDI only ever adds: fonts found in those folders that are not
+ * loaded yet are inserted, and nothing already loaded is removed or
+ * replaced.  Dropping a font while a program may hold its ID, its metrics
+ * or a cached glyph is the crash the rebuild invites, and adding is all a
+ * caller that has just written a new font file needs.  A count of zero,
+ * which makes NVDI empty its lists, therefore does nothing here.
+ *
+ * Runs on fVDI's own stack (see nvdi_scan_fonts below).  Returns the number
+ * of fonts added.
+ */
+static long CDECL rescan_fonts(void *dirs_arg, long count, long flags, long unused)
+{
+    char **dirs = (char **) dirs_arg;
+    char path[PATH_SIZE];
+    Virtual *vwk;
+    long added = 0;
+    long i;
+
+    (void) flags;
+    (void) unused;
+
+    if (!driver_list || !external_init || !dirs)
+        return 0;
+    vwk = ((Driver *) driver_list->value)->default_vwk;
+
+    if (count > 64)
+        count = 64;
+    for (i = 0; i < count; i++)
+    {
+        long len;
+
+        if (!dirs[i])
+            continue;
+        len = length(dirs[i]);
+        if ((len == 0) || (len > PATH_SIZE - 16))
+            continue;
+        copy(dirs[i], path);
+        if ((path[len - 1] != '\\') && (path[len - 1] != '/'))
+        {
+            path[len] = '\\';
+            path[len + 1] = 0;
+        }
+        added += load_font_dir(vwk, path, 1);
+    }
+
+    PRINTF(("NVDI scan_fonts: %ld added, %d in all\n", added, vwk->real_address->writing.fonts));
+
+    return added;
+}
+
+
+/*
+ * The C sides of the two NVDI vectors.  The register-argument entry points
+ * the cookie actually publishes are in startup.c.
+ */
+long CDECL nvdi_scan_fonts(long count, long flags, char **dirs)
+{
+    /* FreeType needs far more stack than a caller in supervisor mode can
+     * be assumed to have, so do the work where the text calls do theirs. */
+    return set_stack_call_lplll(vdi_stack_top, vdi_stack_size, rescan_fonts,
+                                dirs, count, flags, 0);
+}
+
+
+/* NVDI 5's get_font_dir: copy font folder 'index' (from 1) to buf, or
+ * return 0 when there is no such folder. */
+long CDECL nvdi_get_font_dir(long index, char *buf)
+{
+    if (!buf || (index < 1) || (index > font_dirs))
+        return 0;
+    copy(font_dir[index - 1], buf);
+
+    return 1;
+}
+
+
+/* True when fVDI can honour scan_fonts at all. */
+int nvdi_can_scan_fonts(void)
+{
+    return driver_list && external_init;
 }
 
 
@@ -1279,10 +1466,24 @@ static long load_fonts(Virtual *vwk, const char **ptr)
 
     PRINTF(("Fonts: %s\n", fonts));
 
+    /* Remember the folder for NVDI's get_font_dir */
+    if (font_dirs < FONT_DIRS)
+    {
+        long i;
+
+        for (i = 0; i < font_dirs; i++)
+        {
+            if (same_path(font_dir[i], fonts))
+                break;
+        }
+        if (i == font_dirs)
+            copy(fonts, font_dir[font_dirs++]);
+    }
+
     /* Initialize FreeType2 module */
     external_init();
 
-    load_font_dir(vwk, fonts);
+    load_font_dir(vwk, fonts, 0);
 
     PRINTF(("   Load fonts done: %d\n", vwk->real_address->writing.fonts));
 
