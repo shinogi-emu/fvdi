@@ -887,8 +887,114 @@ void CDECL v_clswk(Virtual *vwk, VDIpars *pars)
 }
 
 
+/* Copy at most size - 1 characters and always terminate */
+static void copy_limited(const char *from, char *to, long size)
+{
+    if (!to)
+        return;
+    while (from && *from && --size > 0)
+        *to++ = *from++;
+    *to = 0;
+}
+
+
+/*
+ * vq_ext_devinfo (248 sub 4242): for a device number, whether a driver
+ * exists (intout[0]) and is open (intout[1]), and the folder, file and
+ * name of the driver, into the three buffers whose addresses follow the
+ * device number in intin.
+ *
+ * fVDI answers for its own drivers, the screen devices: the folder it
+ * loaded them from, the file named in FVDI.SYS and the name the driver
+ * gives itself.  The buffers' sizes are not part of the call, so the
+ * strings are kept to what NVDI's are: a 128-byte path, an 8.3 file name
+ * and a 32-byte device name.  Other devices belong to the GDOS below, if
+ * there is one.
+ */
+static void vq_ext_devinfo(VDIpars *pars)
+{
+    short device = pars->intin[0];
+    char *file_path = *(char **)&pars->intin[1];
+    char *file_name = *(char **)&pars->intin[3];
+    char *name = *(char **)&pars->intin[5];
+    List *element;
+    Driver *driver = 0;
+
+    pars->control->l_intout = 2;
+    pars->intout[0] = 0;
+    pars->intout[1] = 0;
+    if (pars->control->l_intin < 7)
+        return;
+
+    if (device > LAST_SCREEN_DEVICE)
+    {
+        if (old_gdos)
+            call_other(pars, 0);
+        return;
+    }
+
+    for (element = driver_list; element; element = element->next)
+    {
+        if (((Driver *)element->value)->module.id == device)
+        {
+            driver = (Driver *)element->value;
+            break;
+        }
+    }
+    if (!driver)
+        return;
+
+    /*
+     * module.file_name is the path fVDI opened the driver by, such as
+     * gemsys\16_bit.sys: split it into folder and file.  Without a drive
+     * the folder is relative to the root of the boot drive, where fVDI
+     * looked from the AUTO folder, so name that drive.
+     */
+    {
+        const char *full = driver->module.file_name;
+        const char *file = full, *p;
+        char dir[130];
+        long n = 0, len;
+
+        for (p = full; *p; p++)
+        {
+            if ((*p == '\\') || (*p == '/') || (*p == ':'))
+                file = p + 1;
+        }
+        len = file - full;
+        if (!len)
+        {
+            full = fvdi_driver_path();
+            len = length(full);
+        }
+        if ((len < 2) || (full[1] != ':'))
+        {
+            dir[n++] = 'A' + *(volatile short *)0x446L;    /* _bootdev */
+            dir[n++] = ':';
+            if (!len || (full[0] != '\\'))
+                dir[n++] = '\\';
+        }
+        while ((len-- > 0) && (n < (long)sizeof(dir) - 1))
+            dir[n++] = *full++;
+        dir[n] = 0;
+
+        copy_limited(dir, file_path, 128);
+        copy_limited(file, file_name, 13);
+    }
+    copy_limited(driver->module.name, name, 32);
+    pars->intout[0] = 1;                /* exists */
+    pars->intout[1] = 1;                /* screen drivers are open from boot */
+}
+
+
 void CDECL vq_devinfo(VDIpars *pars)
 {
+    if (pars->control->subfunction == 4242)
+    {
+        vq_ext_devinfo(pars);
+        return;
+    }
+
     /* For now, just assume that any
      * workstation handle >10 is non-fVDI
      */

@@ -1430,6 +1430,13 @@ long CDECL nvdi_get_font_dir(long index, char *buf)
 }
 
 
+/* The folder fVDI loads its drivers from ('path =', else beside FVDI.SYS) */
+const char *fvdi_driver_path(void)
+{
+    return path;
+}
+
+
 /* True when fVDI can honour scan_fonts at all. */
 int nvdi_can_scan_fonts(void)
 {

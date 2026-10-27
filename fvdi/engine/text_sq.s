@@ -554,6 +554,9 @@ vqt_xfntinfo:
 * In:   a1      Parameter block
 *       a0      VDI struct
 vqt_f_extent:					; Really more complicated
+	move.l	control(a1),a2
+	cmp.w	#4200,subfunction(a2)		; vqt_real_extent?
+	beq	vqt_real_extent
 vqt_extent:
 	uses_d1
 	movem.l	d2-d4/a3-a4,-(a7)
@@ -665,6 +668,35 @@ vqt_extent:
 
 .no_external_vqt_extent:
 	movem.l	(a7)+,d2-d4/a3-a4
+	used_d1
+	done_return
+
+
+* vqt_real_extent - Standard Trap function (240, sub 4200)
+* In:   a1      Parameter block
+*       a0      VDI struct
+vqt_real_extent:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	ptsout(a1),-(a7)
+	move.l	control(a1),a2
+	move.w	6(a2),d0			; Number of characters
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	intin(a1),-(a7)
+	move.l	ptsin(a1),a2
+	move.w	2(a2),d0			; y
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.w	(a2),d0				; x
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_vqt_real_extent
+	add.w	#24,a7
+
+	movem.l	(a7)+,d2/a1
 	used_d1
 	done_return
 

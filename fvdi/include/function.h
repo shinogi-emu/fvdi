@@ -132,6 +132,8 @@ int CDECL inverse_table(Virtual *vwk, long subfunction, short *intin, short *int
 /* NVDI 5's font folder vectors, published through the NVDI cookie */
 long CDECL nvdi_scan_fonts(long count, long flags, char **dirs);
 long CDECL nvdi_get_font_dir(long index, char *buf);
+void CDECL lib_vqt_real_extent(Virtual *vwk, long x, long y, short *text, long length, short *points);
+const char *fvdi_driver_path(void);
 int nvdi_can_scan_fonts(void);
 
 extern char const ft2_version[];

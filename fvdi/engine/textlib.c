@@ -818,3 +818,125 @@ long CDECL lib_vst_setsize32(Virtual *vwk, long point, short *charw, short *char
 
     return ((long) lib_vst_arbpt(vwk, points, charw, charh, cellw, cellh)) << 16;
 }
+
+
+/*
+ * Width of a string in a bitmap font, as vqt_extent works it out in
+ * text_sq.s, effects included.  (That code compares the character less
+ * code.low against code.high rather than against the count of characters,
+ * and so does this, so the two never disagree.)
+ */
+static long bitmap_text_width(Virtual *vwk, Fontheader *font, const short *text, long length)
+{
+    const short *table = font->table.character;
+    unsigned short low = font->code.low, high = font->code.high;
+    unsigned short mask;
+    long width = 0;
+    long i;
+
+    for (i = 0; i < length; i++)
+    {
+        unsigned short ch = (unsigned short)(text[i] - low);
+
+        if (ch > high)
+            continue;
+        width += table[ch + 1] - table[ch];
+    }
+
+    if (vwk->text.effects & 0x01)       /* bold */
+        width += font->thickening;
+    if (vwk->text.effects & 0x10)       /* outlined */
+        width += 2;
+    if (vwk->text.effects & 0x04)       /* italic: a pixel per set mask bit over the height */
+    {
+        mask = font->skewing;
+        for (i = 0; i < font->height; i++)
+        {
+            if (mask & 0x8000)
+                width++;
+            mask = (unsigned short)((mask << 1) | (mask >> 15));
+        }
+    }
+
+    return width;
+}
+
+
+/*
+ * vqt_real_extent (240 sub 4200): the box a string drawn by v_gtext at
+ * (x,y) actually covers, with the text alignment and effects, as four
+ * corners: bottom left, bottom right, top right, top left.
+ *
+ * vqt_f_extent answered for it before, with the plain extent: a box at
+ * 0,0 that ignores where the text goes and how it is aligned.  NVDI also
+ * accounts for rotation and skew; fVDI never rotates text (vst_rotation
+ * always answers 0), so the box here is a rectangle, and for italic text
+ * one wide enough to hold the slant rather than the slanted quadrilateral.
+ */
+void CDECL lib_vqt_real_extent(Virtual *vwk, long x, long y, short *text, long length, short *points)
+{
+    Fontheader *font = vwk->text.current_font;
+    long width, left, right, baseline, top, bottom;
+
+    if (!font || (length < 0))
+        length = 0;
+    if (!font)
+        width = 0;
+    else if ((font->flags & FONTF_EXTERNAL) && external_vqt_extent)
+        width = set_stack_call_lvppl(vdi_stack_top, vdi_stack_size, external_vqt_extent,
+                                     vwk, font, text, length);
+    else
+        width = bitmap_text_width(vwk, font, text, length);
+
+    switch (vwk->text.alignment.horizontal)
+    {
+    case 1:
+        left = x - width / 2;
+        break;
+    case 2:
+        left = x - width;
+        break;
+    default:
+        left = x;
+        break;
+    }
+    right = left + width;
+
+    /* Which line of the text is at y: the baseline is that far from it */
+    baseline = y;
+    if (font)
+    {
+        switch (vwk->text.alignment.vertical)
+        {
+        case 1:                         /* half line */
+            baseline = y + font->distance.half;
+            break;
+        case 2:                         /* ascent line */
+            baseline = y + font->distance.ascent;
+            break;
+        case 3:                         /* bottom line */
+            baseline = y - font->distance.bottom;
+            break;
+        case 4:                         /* descent line */
+            baseline = y - font->distance.descent;
+            break;
+        case 5:                         /* top line */
+            baseline = y + font->distance.top;
+            break;
+        default:                        /* baseline */
+            break;
+        }
+        top = baseline - font->distance.top;
+        bottom = baseline + font->distance.bottom;
+    } else
+        top = bottom = baseline;
+
+    points[0] = (short)left;
+    points[1] = (short)bottom;
+    points[2] = (short)right;
+    points[3] = (short)bottom;
+    points[4] = (short)right;
+    points[5] = (short)top;
+    points[6] = (short)left;
+    points[7] = (short)top;
+}

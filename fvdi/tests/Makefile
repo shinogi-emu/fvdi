@@ -6,7 +6,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -20,6 +20,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) fontscan_guest.c -lgem -o $(TEST_BUILD)/FONTSCAN.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) colors_guest.c -lgem -o $(TEST_BUILD)/COLORS.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) bitmaps_guest.c -lgem -o $(TEST_BUILD)/BITMAPS.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) realext_guest.c -lgem -o $(TEST_BUILD)/REALEXT.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
 # A surviving emulator / successful screenshot is not a passing raster test.
@@ -71,3 +72,10 @@ check-bitmaps-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI BITMAPS FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI BITMAPS GUEST PASS' "$(GUEST_LOG)"
+
+# REALEXT.PRG: vqt_real_extent against vqt_f_extent and vqt_fontinfo, in
+# the system font and an outline font; vq_ext_devinfo for the screen.
+check-realext-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI REALEXT FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI REALEXT GUEST PASS' "$(GUEST_LOG)"
