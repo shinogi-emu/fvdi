@@ -847,9 +847,15 @@ static void bit_blt(struct blit_frame *info)
         blt->dst_addr = (unsigned short *)d_addr;         /* Load Dest ptr to this plane */
         blt->y_cnt = info->b_ht;        /* Load the line count */
 
-        /* Calculate operation for actual plane */
-        op_tabidx = ((info->fg_col >> plane) & 0x0001) << 1;
-        op_tabidx |= (info->bg_col >> plane) & 0x0001;
+        /*
+         * Calculate operation for actual plane.  The planes are taken in
+         * memory order, the first one first, while 'plane' counts down:
+         * the first plane's colour is bit 0, not bit plane_ct - 1.  Taken
+         * the other way round, text and icons came out in the pen with
+         * the colour's bits reversed (red as pen 9 at four planes).
+         */
+        op_tabidx = ((info->fg_col >> (info->plane_ct - 1 - plane)) & 0x0001) << 1;
+        op_tabidx |= (info->bg_col >> (info->plane_ct - 1 - plane)) & 0x0001;
         blt->op = info->op_tab[op_tabidx] & 0x000f;
 
         do_blit(blt);

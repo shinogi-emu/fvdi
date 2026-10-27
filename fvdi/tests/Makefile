@@ -6,7 +6,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-vdibench-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-vdibench-log check-pens-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -24,6 +24,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) nvdimisc_guest.c -lgem -o $(TEST_BUILD)/NVDIMISC.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) outline_guest.c -lgem -o $(TEST_BUILD)/OUTLINE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) vdibench_guest.c -lgem -o $(TEST_BUILD)/VDIBENCH.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) pens_guest.c -lgem -o $(TEST_BUILD)/PENS.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
@@ -107,3 +108,10 @@ check-vdibench-log:
 	! grep -Eq 'FVDI VDIBENCH FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI VDIBENCH GUEST PASS' "$(GUEST_LOG)"
 	test "$$(grep -c '^VDIBENCH [a-z-]* ticks=' "$(GUEST_LOG)")" -ge 15
+
+# PENS.PRG: text, vrt_cpyfm, fills and lines in each pen read back as
+# that pen.  Palette screens (8 planes or fewer); SKIPPED above.
+check-pens-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI PENS FAIL|Panic' "$(GUEST_LOG)"
+	grep -Eq 'FVDI PENS GUEST (PASS|SKIPPED)' "$(GUEST_LOG)"
