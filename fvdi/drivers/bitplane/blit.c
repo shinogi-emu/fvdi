@@ -1009,6 +1009,91 @@ static void copy_rows(const struct blit_frame *info)
 
 
 /*
+ * A plain copy (replace mode) between forms with the same interleaved
+ * planes, where source and destination sit at different places in a
+ * word, at four planes or more.  Each plane needs its source words
+ * shifted; bit_blt does a plane at a time, this does all planes of a
+ * column per step.  Rows go bottom
+ * up when the copy could overlap itself; a copy whose source and
+ * destination share rows of the same form is left to bit_blt, as the
+ * order within a row would matter.  Returns 0 for that.
+ */
+static int shift_rows(const struct blit_frame *info)
+{
+    int planes = info->d_nxwd >> 1, k;
+    long dx0 = info->d_xmin, dx1 = info->d_xmin + info->b_wd - 1;
+    long sx0 = info->s_xmin, sx1 = info->s_xmin + info->b_wd - 1;
+    long cols = (dx1 >> 4) - (dx0 >> 4) + 1, last = (sx1 >> 4) - (sx0 >> 4), tail;
+    int off = (int)(dx0 & 15) - (int)(sx0 & 15), sh;
+    unsigned short lm = 0xffff >> (dx0 & 15), rm = 0xffff << (15 - (dx1 & 15));
+    long s_line = info->s_nxln >> 1, d_line = info->d_nxln >> 1, rows = info->b_ht;
+    unsigned short *srow, *drow;
+    unsigned long acc[8];
+
+    /* At one and two planes bit_blt's own loop is quicker */
+    if (planes < 4 || planes > 8 || info->b_wd <= 0 || rows <= 0)
+        return 0;
+    if (info->s_form == info->d_form &&
+        info->s_ymin <= info->d_ymin + rows - 1 && info->d_ymin <= info->s_ymin + rows - 1)
+    {
+        /* Rows shared: only safe when no row is both read and written */
+        if (info->s_ymin == info->d_ymin)
+            return 0;
+    }
+    if (cols == 1)
+        lm &= rm;
+    sh = off >= 0 ? off : 16 + off;
+    tail = off >= 0 ? cols - 1 : cols;
+
+    srow = info->s_form + info->s_ymin * s_line + (sx0 >> 4) * planes;
+    drow = info->d_form + info->d_ymin * d_line + (dx0 >> 4) * planes;
+    if (srow < drow)
+    {
+        /* Bottom up, so that rows are read before they are written */
+        srow += (rows - 1) * s_line;
+        drow += (rows - 1) * d_line;
+        s_line = -s_line;
+        d_line = -d_line;
+    }
+
+    for (; rows > 0; rows--, srow += s_line, drow += d_line)
+    {
+        unsigned short *sp, *dp = drow;
+        long c;
+
+        for (k = 0; k < planes; k++)
+        {
+            if (off >= 0)
+                acc[k] = srow[k];
+            else
+                acc[k] = ((unsigned long)srow[k] << 16) | (last >= 1 ? srow[planes + k] : 0);
+            dp[k] = (dp[k] & ~lm) | ((unsigned short)(acc[k] >> sh) & lm);
+        }
+        if (cols == 1)
+            continue;
+        dp += planes;
+        sp = srow + (off >= 0 ? planes : 2 * planes);
+
+        for (c = cols - 2; c > 0; c--)
+        {
+            for (k = 0; k < planes; k++)
+            {
+                acc[k] = (acc[k] << 16) | *sp++;
+                *dp++ = (unsigned short)(acc[k] >> sh);
+            }
+        }
+
+        for (k = 0; k < planes; k++)
+        {
+            acc[k] = (acc[k] << 16) | (tail <= last ? srow[tail * planes + k] : 0);
+            dp[k] = (dp[k] & ~rm) | ((unsigned short)(acc[k] >> sh) & rm);
+        }
+    }
+    return 1;
+}
+
+
+/*
  * copy raster opaque
  *
  * This function copies a rectangular raster area from source form to
@@ -1037,6 +1122,8 @@ long CDECL c_blit_area(Virtual *vwk, MFDB *src, long src_x, long src_y, MFDB *ds
         copy_rows(&info);
         return 1;
     }
+    if (operation == 3 && shift_rows(&info))
+        return 1;
 
     info.op_tab[0] = operation;         /* fg:0 bg:0 */
     info.bg_col = 0;                    /* bg:0 & fg:0 => only first OP_TAB */
@@ -1044,6 +1131,171 @@ long CDECL c_blit_area(Virtual *vwk, MFDB *src, long src_x, long src_y, MFDB *ds
 
     bit_blt(&info);
 
+    return 1;
+}
+
+
+/*
+ * A one-plane source expanded into a form of two, four or eight
+ * interleaved planes: text, and vrt_cpyfm.  bit_blt does that a plane at
+ * a time, building every source word again for every plane.  Here each
+ * destination column's 16 source bits are built once and all planes of
+ * the column done together.
+ *
+ * Each plane's logic operation, as expand_area picks them, is
+ * new = (old & keep) ^ set with keep and set either 0, ~0, S or ~S; that
+ * is (S & ka) ^ kx and (S & sa) ^ sx with constant masks.  Two planes
+ * are one long word.  Returns 0, leaving it to bit_blt, for anything
+ * else.
+ */
+static int expand_rows(const struct blit_frame *info)
+{
+    /* ka, kx, sa, sx for each logic operation; ka 1 marks "not handled" */
+    static const unsigned char op_masks[16][4] = {
+        { 0, 0, 0, 0 },     /* 0: 0 */
+        { 1, 0, 0, 0 },     /* 1: S and D */
+        { 2, 0, 0, 0 },     /* 2 */
+        { 0, 0, 1, 0 },     /* 3: S */
+        { 1, 1, 0, 0 },     /* 4: not S and D */
+        { 2, 0, 0, 0 },     /* 5 */
+        { 0, 1, 1, 0 },     /* 6: S xor D */
+        { 1, 1, 1, 0 },     /* 7: S or D */
+        { 2, 0, 0, 0 },     /* 8 */
+        { 2, 0, 0, 0 },     /* 9 */
+        { 2, 0, 0, 0 },     /* 10 */
+        { 2, 0, 0, 0 },     /* 11 */
+        { 0, 0, 1, 1 },     /* 12: not S */
+        { 1, 0, 1, 1 },     /* 13: not S or D */
+        { 2, 0, 0, 0 },     /* 14 */
+        { 0, 0, 0, 1 }      /* 15: 1 */
+    };
+    unsigned long ka[4], kx[4], sa[4], sx[4];
+    int planes = info->d_nxwd >> 1, pairs, k;
+    long dx0 = info->d_xmin, dx1 = info->d_xmin + info->b_wd - 1;
+    long sx0 = info->s_xmin, sx1 = info->s_xmin + info->b_wd - 1;
+    long cols = (dx1 >> 4) - (dx0 >> 4) + 1, sw0 = sx0 >> 4, sw1 = sx1 >> 4, last = sw1 - sw0;
+    int off = (int)(dx0 & 15) - (int)(sx0 & 15);
+    unsigned short lm = 0xffff >> (dx0 & 15), rm = 0xffff << (15 - (dx1 & 15));
+    unsigned long lml, rml;
+    long s_line = info->s_nxln >> 1, d_line = info->d_nxln >> 1, rows = info->b_ht, tail;
+    int sh;
+    unsigned short *srow, *drow;
+
+    if ((planes != 2 && planes != 4 && planes != 8) || info->b_wd <= 0 || rows <= 0)
+        return 0;
+    pairs = planes >> 1;
+    for (k = 0; k < planes; k++)
+    {
+        int op = info->op_tab[(((info->fg_col >> k) & 1) << 1) | ((info->bg_col >> k) & 1)] & 15;
+        const unsigned char *mk = op_masks[op];
+        unsigned long half = k & 1 ? 0xffffUL : 0xffff0000UL;
+
+        if (mk[0] == 2)
+            return 0;
+        if (!(k & 1))
+            ka[k >> 1] = kx[k >> 1] = sa[k >> 1] = sx[k >> 1] = 0;
+        if (mk[0])
+            ka[k >> 1] |= half;
+        if (mk[1])
+            kx[k >> 1] |= half;
+        if (mk[2])
+            sa[k >> 1] |= half;
+        if (mk[3])
+            sx[k >> 1] |= half;
+    }
+    if (cols == 1)
+        lm &= rm;
+    lml = ((unsigned long)lm << 16) | lm;
+    rml = ((unsigned long)rm << 16) | rm;
+    sh = off >= 0 ? off : 16 + off;
+    tail = off >= 0 ? cols - 1 : cols;
+
+    srow = info->s_form + info->s_ymin * s_line + sw0;
+    drow = info->d_form + info->d_ymin * d_line + (dx0 >> 4) * planes;
+    for (; rows > 0; rows--, srow += s_line, drow += d_line)
+    {
+        unsigned long *dp = (unsigned long *)drow;
+        const unsigned short *sp;
+        unsigned long acc, sl, d, n;
+        long c;
+        int j;
+
+        /*
+         * The source bits for a column are acc >> sh, acc holding two
+         * source words.  Words outside the source rectangle are not
+         * read: only the end columns could need one, and they take 0.
+         */
+        if (off >= 0)
+        {
+            acc = srow[0];
+            sp = srow + 1;
+        } else
+        {
+            acc = ((unsigned long)srow[0] << 16) | (last >= 1 ? srow[1] : 0);
+            sp = srow + 2;
+        }
+
+        /* First column, masked */
+        sl = (unsigned short)(acc >> sh);
+        sl |= sl << 16;
+        for (j = 0; j < pairs; j++, dp++)
+        {
+            d = *dp;
+            n = (d & ((sl & ka[j]) ^ kx[j])) ^ ((sl & sa[j]) ^ sx[j]);
+            *dp = d ^ ((n ^ d) & lml);
+        }
+        if (cols == 1)
+            continue;
+
+        /* Whole columns */
+        c = cols - 2;
+        if (pairs == 1)
+        {
+            unsigned long ka0 = ka[0], kx0 = kx[0], sa0 = sa[0], sx0 = sx[0];
+
+            for (; c > 0; c--, dp++)
+            {
+                acc = (acc << 16) | *sp++;
+                sl = (unsigned short)(acc >> sh);
+                sl |= sl << 16;
+                *dp = (*dp & ((sl & ka0) ^ kx0)) ^ ((sl & sa0) ^ sx0);
+            }
+        } else if (pairs == 2)
+        {
+            unsigned long ka0 = ka[0], kx0 = kx[0], sa0 = sa[0], sx0 = sx[0];
+            unsigned long ka1 = ka[1], kx1 = kx[1], sa1 = sa[1], sx1 = sx[1];
+
+            for (; c > 0; c--, dp += 2)
+            {
+                acc = (acc << 16) | *sp++;
+                sl = (unsigned short)(acc >> sh);
+                sl |= sl << 16;
+                dp[0] = (dp[0] & ((sl & ka0) ^ kx0)) ^ ((sl & sa0) ^ sx0);
+                dp[1] = (dp[1] & ((sl & ka1) ^ kx1)) ^ ((sl & sa1) ^ sx1);
+            }
+        } else
+        {
+            for (; c > 0; c--)
+            {
+                acc = (acc << 16) | *sp++;
+                sl = (unsigned short)(acc >> sh);
+                sl |= sl << 16;
+                for (j = 0; j < 4; j++, dp++)
+                    *dp = (*dp & ((sl & ka[j]) ^ kx[j])) ^ ((sl & sa[j]) ^ sx[j]);
+            }
+        }
+
+        /* Last column, masked */
+        acc = (acc << 16) | (tail <= last ? srow[tail] : 0);
+        sl = (unsigned short)(acc >> sh);
+        sl |= sl << 16;
+        for (j = 0; j < pairs; j++, dp++)
+        {
+            d = *dp;
+            n = (d & ((sl & ka[j]) ^ kx[j])) ^ ((sl & sa[j]) ^ sx[j]);
+            *dp = d ^ ((n ^ d) & rml);
+        }
+    }
     return 1;
 }
 
@@ -1128,6 +1380,8 @@ long CDECL c_expand_area(Virtual *vwk, MFDB *src, long src_x, long src_y,
         return 1;                       /* Unsupported mode */
     }
 
+    if (expand_rows(&info))
+        return 1;
     bit_blt(&info);
 
     return 1;
