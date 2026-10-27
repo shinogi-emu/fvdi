@@ -41,7 +41,7 @@
  * 6b. else mask out left fringe, write words, process the right fringe
  */
 
-static void draw_rect(Virtual *vwk, long x1, long y1, long w, long h, short *patternptr, unsigned short fillcolor, long mode)
+static void __attribute__((noinline)) draw_rect_per_plane(Virtual *vwk, long x1, long y1, long w, long h, short *patternptr, unsigned short fillcolor, long mode)
 {
     unsigned short leftmask, rightmask, patmsk;
     unsigned short *addr;
@@ -468,6 +468,155 @@ static void draw_rect(Virtual *vwk, long x1, long y1, long w, long h, short *pat
     }
 }
 
+
+
+/*
+ * A fill more than one word wide, at two planes or more, with the same
+ * pattern word on every row it covers - a solid fill, the usual kind.
+ * In one plane every mode is new = (old & keep) ^ set inside the pixels
+ * filled:
+ *
+ *   mode               keep        set (colour bit 1)   set (colour bit 0)
+ *   replace            0           pattern              0
+ *   transparent        ~pattern    pattern              0
+ *   xor                ~0          pattern              pattern
+ *   reverse transp.    pattern     ~pattern             0
+ *
+ * keep is the same for every plane, and with one pattern word it is the
+ * same for every row, so it is all worked out once.  Rows are then written
+ * a column at a time, all planes of a column together: the planes are
+ * interleaved, so that is one run of memory, and two planes are one long
+ * word.  Patterned and one-plane fills stay with draw_rect_per_plane(),
+ * which is quicker for them.
+ */
+static void __attribute__((noinline)) fill_columns(Virtual *vwk, long x1, long y1, long w, long h,
+            unsigned short pat, unsigned short fillcolor, long mode)
+{
+    Workstation *wk = vwk->real_address;
+    int planes = wk->screen.mfdb.bitplanes;
+    long x2 = x1 + w - 1;
+    long wrap = wk->screen.wrap >> 1;
+    long middle = (x2 >> 4) - (x1 >> 4) - 1;
+    unsigned short lm = 0xffff >> (x1 & 15);
+    unsigned short rm = 0xffff << (15 - (x2 & 15));
+    unsigned short *row = (unsigned short *)wk->screen.mfdb.address + y1 * wrap + (x1 >> 4) * planes;
+    unsigned short keep, k_l, k_r, set[8], setl[8], setr[8];
+    unsigned short color = fillcolor;
+    unsigned long keepl, l0, l1, l2, l3;
+    int k;
+
+    switch (mode) {
+    case 2:     /* transparent */
+        keep = ~pat;
+        for (k = 0; k < planes; k++, color >>= 1)
+            set[k] = color & 1 ? pat : 0;
+        break;
+    case 3:     /* xor */
+        keep = 0xffff;
+        for (k = 0; k < planes; k++)
+            set[k] = pat;
+        break;
+    case 4:     /* reverse transparent */
+        keep = pat;
+        for (k = 0; k < planes; k++, color >>= 1)
+            set[k] = color & 1 ? ~pat : 0;
+        break;
+    default:    /* replace, as draw_rect_per_plane() takes anything else */
+        keep = 0;
+        for (k = 0; k < planes; k++, color >>= 1)
+            set[k] = color & 1 ? pat : 0;
+        break;
+    }
+    for (k = 0; k < planes; k++) {
+        setl[k] = set[k] & lm;
+        setr[k] = set[k] & rm;
+    }
+    k_l = keep | ~lm;
+    k_r = keep | ~rm;
+    keepl = ((unsigned long)keep << 16) | keep;
+    l0 = ((unsigned long)set[0] << 16) | set[1];
+    l1 = planes > 2 ? ((unsigned long)set[2] << 16) | set[3] : 0;
+    l2 = planes > 4 ? ((unsigned long)set[4] << 16) | set[5] : 0;
+    l3 = planes > 4 ? ((unsigned long)set[6] << 16) | set[7] : 0;
+
+    for (; h > 0; h--, row += wrap) {
+        unsigned short *p = row;
+        unsigned long *lp;
+        long n = middle;
+
+        for (k = 0; k < planes; k++)
+            p[k] = (p[k] & k_l) ^ setl[k];
+        lp = (unsigned long *)(p + planes);
+
+        if (keep == 0) {
+            switch (planes) {
+            case 8:
+                for (; n > 0; n--, lp += 4) {
+                    lp[0] = l0;
+                    lp[1] = l1;
+                    lp[2] = l2;
+                    lp[3] = l3;
+                }
+                break;
+            case 4:
+                for (; n > 0; n--, lp += 2) {
+                    lp[0] = l0;
+                    lp[1] = l1;
+                }
+                break;
+            default:
+                for (; n > 0; n--)
+                    *lp++ = l0;
+                break;
+            }
+        } else {
+            switch (planes) {
+            case 8:
+                for (; n > 0; n--, lp += 4) {
+                    lp[0] = (lp[0] & keepl) ^ l0;
+                    lp[1] = (lp[1] & keepl) ^ l1;
+                    lp[2] = (lp[2] & keepl) ^ l2;
+                    lp[3] = (lp[3] & keepl) ^ l3;
+                }
+                break;
+            case 4:
+                for (; n > 0; n--, lp += 2) {
+                    lp[0] = (lp[0] & keepl) ^ l0;
+                    lp[1] = (lp[1] & keepl) ^ l1;
+                }
+                break;
+            default:
+                for (; n > 0; n--, lp++)
+                    *lp = (*lp & keepl) ^ l0;
+                break;
+            }
+        }
+
+        p = (unsigned short *)lp;
+        for (k = 0; k < planes; k++)
+            p[k] = (p[k] & k_r) ^ setr[k];
+    }
+}
+
+
+static void draw_rect(Virtual *vwk, long x1, long y1, long w, long h, short *patternptr, unsigned short fillcolor, long mode)
+{
+    int planes = vwk->real_address->screen.mfdb.bitplanes;
+    long i, rows = h < 16 ? h : 16;
+    unsigned short pat = patternptr[y1 & 15];
+
+    if ((planes == 2 || planes == 4 || planes == 8) && ((x1 + w - 1) >> 4) > (x1 >> 4) && h > 0) {
+        for (i = 1; i < rows; i++) {
+            if ((unsigned short)patternptr[(y1 + i) & 15] != pat)
+                break;
+        }
+        if (i == rows) {
+            fill_columns(vwk, x1, y1, w, h, pat, fillcolor, mode);
+            return;
+        }
+    }
+    draw_rect_per_plane(vwk, x1, y1, w, h, patternptr, fillcolor, mode);
+}
 
 long CDECL c_fill_area(Virtual *vwk, long x, long y, long w, long h, short *pattern,
             long colour, long mode, long interior_style)
