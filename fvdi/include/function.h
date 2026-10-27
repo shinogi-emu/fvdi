@@ -137,6 +137,9 @@ long CDECL nvdi_scan_fonts(long count, long flags, char **dirs);
 long CDECL nvdi_get_font_dir(long index, char *buf);
 void CDECL lib_vqt_real_extent(Virtual *vwk, long x, long y, short *text, long length, short *points);
 const char *fvdi_driver_path(void);
+extern long (*external_get_outline)(Virtual *vwk, Fontheader *font, long ch, void *args);
+void CDECL lib_v_getoutline(Virtual *vwk, long subfunction, short *intin, short *intout, Control *control);
+void CDECL lib_vst_width(Virtual *vwk, short *ptsout);
 int nvdi_can_scan_fonts(void);
 
 extern char const ft2_version[];

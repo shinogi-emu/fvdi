@@ -8,6 +8,7 @@
  */
 
 #include "fvdi.h"
+#include "outline.h"
 #include "relocate.h"
 #include "os.h"         /* Fopen/Fread/Fclose and O_RDONLY, for the font-file cache */
 
@@ -18,6 +19,7 @@
 #include FT_GLYPH_H
 #include FT_SYNTHESIS_H
 #include FT_STROKER_H
+#include FT_OUTLINE_H
 #include FT_SFNT_NAMES_H
 #include FT_TRUETYPE_IDS_H
 #include FT_TRUETYPE_TABLES_H	/* TT_OS2, FT_Get_Sfnt_Table */
@@ -3236,3 +3238,136 @@ char *getenv(const char *str)
     FT_UNUSED( weights );
   }
 #endif
+
+
+/*
+ * A character's outline as GEM Bezier data, for v_getoutline and
+ * v_get_outline: points in whole pixels, x from the character origin and
+ * y UP from the baseline (the engine places them), with v_bez's flags -
+ * bit 0 starts a four-point Bezier, bit 1 is a jump not joined to the
+ * point before.  Each contour starts with a jump and is closed.
+ *
+ * The glyph is loaded unhinted, so the outline is the font's own shape at
+ * the current size rather than the one fitted to the pixel grid.
+ * TrueType's quadratic segments become cubics with the same curve: the
+ * two controls lie two thirds of the way from each end to the quadratic
+ * control point.
+ */
+
+
+static long px(FT_Pos v)
+{
+    return v >= 0 ? (v + 32) >> 6 : -((-v + 32) >> 6);
+}
+
+static void outline_point(OutlineArgs *o, FT_Pos x, FT_Pos y, char flag)
+{
+    if (o->count >= o->max)
+    {
+        o->overflow = 1;
+        return;
+    }
+    o->xy[o->count * 2] = (short)px(x);
+    o->xy[o->count * 2 + 1] = (short)px(y);
+    o->bez[o->count] = flag;
+    o->count++;
+}
+
+static void outline_close(OutlineArgs *o)
+{
+    if (o->open && (o->last_x != o->start_x || o->last_y != o->start_y))
+        outline_point(o, o->start_x, o->start_y, 0);
+    o->open = 0;
+}
+
+static int outline_move(const FT_Vector *to, void *user)
+{
+    OutlineArgs *o = user;
+
+    outline_close(o);
+    outline_point(o, to->x, to->y, 2);          /* jump */
+    o->start_x = o->last_x = to->x;
+    o->start_y = o->last_y = to->y;
+    o->open = 1;
+    return o->overflow;
+}
+
+static int outline_line(const FT_Vector *to, void *user)
+{
+    OutlineArgs *o = user;
+
+    outline_point(o, to->x, to->y, 0);
+    o->last_x = to->x;
+    o->last_y = to->y;
+    return o->overflow;
+}
+
+static int outline_cubic(const FT_Vector *c1, const FT_Vector *c2, const FT_Vector *to, void *user)
+{
+    OutlineArgs *o = user;
+
+    if (o->count > 0 && o->count <= o->max)
+        o->bez[o->count - 1] |= 1;              /* the last point starts this Bezier */
+    outline_point(o, c1->x, c1->y, 0);
+    outline_point(o, c2->x, c2->y, 0);
+    outline_point(o, to->x, to->y, 0);
+    o->last_x = to->x;
+    o->last_y = to->y;
+    return o->overflow;
+}
+
+static int outline_conic(const FT_Vector *control, const FT_Vector *to, void *user)
+{
+    OutlineArgs *o = user;
+    FT_Vector c1, c2;
+
+    c1.x = o->last_x + (2 * (control->x - o->last_x)) / 3;
+    c1.y = o->last_y + (2 * (control->y - o->last_y)) / 3;
+    c2.x = to->x + (2 * (control->x - to->x)) / 3;
+    c2.y = to->y + (2 * (control->y - to->y)) / 3;
+
+    return outline_cubic(&c1, &c2, to, user);
+}
+
+/* Returns the number of points, 0 for no outline, -1 when max is too small */
+long CDECL ft2_get_outline(Virtual *vwk, Fontheader *font, long ch, void *args)
+{
+    OutlineArgs *o = args;
+    FT_Outline_Funcs funcs;
+    FT_Face face;
+    FT_UInt glyph;
+    short intin[3];
+    unsigned short code;
+
+    o->count = 0;
+    o->advance = 0;
+    o->overflow = 0;
+    o->open = 0;
+
+    face = ft2_get_face(vwk, font);
+    if (!face || !FT_IS_SCALABLE(face))
+        return 0;
+
+    intin[0] = (short)ch;
+    intin[1] = vwk->text.charmap;
+    intin[2] = MAP_UNICODE;
+    code = ft2_char_index(vwk, font, intin);
+    if (code == 0xffff || (glyph = FT_Get_Char_Index(face, code)) == 0)
+        return 0;
+
+    if (FT_Load_Glyph(face, glyph, FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING) ||
+        face->glyph->format != FT_GLYPH_FORMAT_OUTLINE)
+        return 0;
+    o->advance = px(face->glyph->advance.x);
+
+    funcs.move_to = outline_move;
+    funcs.line_to = outline_line;
+    funcs.conic_to = outline_conic;
+    funcs.cubic_to = outline_cubic;
+    funcs.shift = 0;
+    funcs.delta = 0;
+    FT_Outline_Decompose(&face->glyph->outline, &funcs, o);
+    outline_close(o);
+
+    return o->overflow ? -1 : o->count;
+}

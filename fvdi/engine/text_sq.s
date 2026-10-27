@@ -36,6 +36,8 @@ SUB1		equ	0		; Subtract 1 from text width? (NVDI apparently doesn't)
 	xdef	vqt_trackkern,vqt_pairkern,vst_kern,v_getbitmap_info
 	xdef	vqt_advance,vst_skew
 	xdef	vst_name,vst_setsize
+	xdef	v_getoutline,vst_width
+	xref	_lib_v_getoutline,_lib_vst_width
 
 	xdef	vqt_char_index
 	xref	_lib_vqt_char_index
@@ -668,6 +670,48 @@ vqt_extent:
 
 .no_external_vqt_extent:
 	movem.l	(a7)+,d2-d4/a3-a4
+	used_d1
+	done_return
+
+
+* v_getoutline - Standard Trap function (243, and sub 1 v_get_outline)
+* In:   a1      Parameter block
+*       a0      VDI struct
+v_getoutline:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	control(a1),-(a7)
+	move.l	intout(a1),-(a7)
+	move.l	intin(a1),-(a7)
+	move.l	control(a1),a2
+	move.w	subfunction(a2),d0
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_v_getoutline
+	add.w	#20,a7
+
+	movem.l	(a7)+,d2/a1
+	used_d1
+	done_return
+
+
+* vst_width - Standard Trap function (231)
+* In:   a1      Parameter block
+*       a0      VDI struct
+vst_width:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	ptsout(a1),-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_vst_width
+	addq.l	#8,a7
+
+	movem.l	(a7)+,d2/a1
+	move.l	control(a1),a2
+	move.w	#2,L_ptsout(a2)
 	used_d1
 	done_return
 

@@ -19,3 +19,4 @@ void *ft2_char_advance(Virtual *vwk, Fontheader *font, long ch, short *advance_i
 void ft2_xfntinfo(Virtual *vwk, Fontheader *font, long flags, XFNT_INFO *info);
 void ft2_fontheader(Virtual *vwk, Fontheader *font, VQT_FHDR *fhdr);
 unsigned short ft2_char_index(Virtual *vwk, Fontheader *font, short *intin);
+long CDECL ft2_get_outline(Virtual *vwk, Fontheader *font, long ch, void *args);

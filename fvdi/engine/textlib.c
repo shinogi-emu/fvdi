@@ -7,6 +7,7 @@
  */
 
 #include "fvdi.h"
+#include "outline.h"
 #include "function.h"
 #include "globals.h"
 #include "utility.h"
@@ -939,4 +940,102 @@ void CDECL lib_vqt_real_extent(Virtual *vwk, long x, long y, short *text, long l
     points[5] = (short)top;
     points[6] = (short)left;
     points[7] = (short)top;
+}
+
+
+/*
+ * v_getoutline (243) and v_get_outline (243 sub 1): a character's outline
+ * as v_bez data in the caller's xyarray and bezarray, from the outline font
+ * in use.  intin: character, max points, the two buffer addresses, and for
+ * v_get_outline an x and y offset.  intout[0] is the number of points, 0
+ * when there is no outline or it does not fit in max points.
+ *
+ * v_getoutline puts y 0 at the top of the character cell, as NVDI did for
+ * TrueType and PostScript fonts.  v_get_outline places the character like
+ * v_gtext at the offsets, by the text alignment.  fVDI does not rotate
+ * text, so neither does this; effects are not applied.
+ */
+
+void CDECL lib_v_getoutline(Virtual *vwk, long subfunction, short *intin, short *intout, Control *control)
+{
+    OutlineArgs args;
+    Fontheader *font = vwk->text.current_font;
+    long count, i, x0, baseline;
+
+    control->l_intout = 1;
+    intout[0] = 0;
+    if (!font || !(font->flags & FONTF_EXTERNAL) || !external_get_outline ||
+        (control->l_intin < (subfunction == 1 ? 8 : 6)) || (intin[1] <= 0))
+        return;
+
+    args.xy = *(short **)&intin[2];
+    args.bez = *(char **)&intin[4];
+    args.max = intin[1];
+    if (!args.xy || !args.bez)
+        return;
+
+    count = set_stack_call_lvplp(vdi_stack_top, vdi_stack_size, external_get_outline,
+                                 vwk, font, (long)(unsigned short)intin[0], &args);
+    if (count <= 0)
+        return;
+
+    if (subfunction == 1)
+    {
+        x0 = intin[6];
+        switch (vwk->text.alignment.horizontal)
+        {
+        case 1:
+            x0 -= args.advance / 2;
+            break;
+        case 2:
+            x0 -= args.advance;
+            break;
+        }
+        baseline = intin[7];
+        switch (vwk->text.alignment.vertical)
+        {
+        case 1:
+            baseline += font->distance.half;
+            break;
+        case 2:
+            baseline += font->distance.ascent;
+            break;
+        case 3:
+            baseline -= font->distance.bottom;
+            break;
+        case 4:
+            baseline -= font->distance.descent;
+            break;
+        case 5:
+            baseline += font->distance.top;
+            break;
+        }
+    } else
+    {
+        x0 = 0;
+        baseline = font->distance.top;          /* y 0 at the top of the cell */
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        args.xy[i * 2] = (short)(x0 + args.xy[i * 2]);
+        args.xy[i * 2 + 1] = (short)(baseline - args.xy[i * 2 + 1]);
+    }
+    intout[0] = (short)count;
+}
+
+
+/*
+ * vst_width (231): NVDI sets the character width in pixels, separately
+ * from the height.  fVDI's fonts scale as a whole, by point size, so the
+ * width cannot change on its own; this reports the character and cell
+ * sizes in effect, so a caller learns the width it really has instead of
+ * being left with whatever was in its ptsout.
+ */
+void CDECL lib_vst_width(Virtual *vwk, short *ptsout)
+{
+    ptsout[0] = vwk->text.character.width;
+    ptsout[1] = vwk->text.character.height;
+    ptsout[2] = vwk->text.cell.width;
+    ptsout[3] = vwk->text.cell.height;
 }

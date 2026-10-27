@@ -380,7 +380,7 @@ default_functions:
 	dc.l	vqt_xfntinfo
 	dc.w	0,0
 	dc.l	vst_name
-	dc.w	0,0
+	dc.w	2,0
 	dc.l	vst_width
 	dc.w	0,0
 	dc.l	vqt_fontheader
@@ -404,7 +404,7 @@ default_functions:
 	dc.l	v_ftext
 	dc.w	0,0
 	dc.l	v_kill_outline
-	dc.w	0,0
+	dc.w	0,1
 	dc.l	v_getoutline
 	dc.w	0,0
 	dc.l	vst_scratch
