@@ -9,7 +9,8 @@
  * up by name.  This program repeats that sequence step by step.
  *
  * Run it under the AES (it opens a virtual workstation).  Before boot, put
- * a TrueType font that is in no font folder at C:\FONTSCAN\TESTFONT.TTF and
+ * a TrueType font that is in no font folder at C:\FONTSCAN\TESTFONT.TTF (or
+ * C:\VTEST\TESTFONT.TTF) and
  * pass its family name as the first argument (default "DejaVu Sans").  It
  * copies the file into <font folder>\HWFONTS\ itself, so the font cannot
  * have been there when fVDI loaded its fonts.
@@ -24,6 +25,7 @@
 #include <string.h>
 
 #define SOURCE_FONT "C:\\FONTSCAN\\TESTFONT.TTF"
+#define SOURCE_FONT2 "C:\\VTEST\\TESTFONT.TTF"   /* where the test runner puts it */
 #define NVDI_COOKIE 0x4E564449UL    /* 'NVDI' */
 #define FVDI_COOKIE 0x66564449UL    /* 'fVDI' */
 #define NVDI_FONTSCAN 0x0100        /* fVDI cookie flag: the vectors are real */
@@ -307,7 +309,8 @@ int main(int argc, char **argv)
     snprintf(target, sizeof(target), "%sHWFONTS", folder);
     (void) Dcreate(target);              /* may exist already */
     snprintf(target, sizeof(target), "%sHWFONTS\\TESTFONT.TTF", folder);
-    check(copy_file(SOURCE_FONT, target), "font copied into HWFONTS");
+    check(copy_file(SOURCE_FONT, target) || copy_file(SOURCE_FONT2, target),
+          "font copied into HWFONTS");
     if (failed)
         goto out;
 
