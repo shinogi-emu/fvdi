@@ -15,9 +15,11 @@ transparent	equ	1		; Fall through?
 	xref	_lib_vs_color,_lib_vq_color,_lib_vs_fg_color,_lib_vs_bg_color
 	xref	_lib_vq_fg_color,_lib_vq_bg_color
 	xref	_lib_vs_x_color,_lib_vq_x_color
+	xref	_lib_v_setrgb,_lib_vr_clip_rects,_lib_v_bez_qual
 
 	xdef	vs_fg_color,vs_bg_color,vq_fg_color,vq_bg_color
 	xdef	vs_x_color,vq_x_color
+	xdef	v_setrgb,vr_clip_rects,v_bez_qual
 	xdef	vs_color,vq_color
 	xdef	_set_palette
 
@@ -117,6 +119,75 @@ vs_x_color:
 	movem.l	(a7)+,d2/a1
 	move.l	intout(a1),a2
 	move.w	d0,(a2)
+	used_d1
+	done_return
+
+
+* v_setrgb - Standard Trap function (138, sub-function = object type)
+* In:   a1      Parameter block
+*       a0      VDI struct
+v_setrgb:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	intin(a1),-(a7)
+	move.l	control(a1),a2
+	move.w	subfunction(a2),d0
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_v_setrgb
+	add.w	#12,a7
+
+	movem.l	(a7)+,d2/a1
+	used_d1
+	done_return
+
+
+* vr_clip_rects - Standard Trap function (171, sub-functions 0-3)
+* In:   a1      Parameter block
+*       a0      VDI struct
+vr_clip_rects:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	control(a1),-(a7)
+	move.l	intout(a1),-(a7)
+	move.l	ptsout(a1),-(a7)
+	move.l	ptsin(a1),-(a7)
+	move.l	control(a1),a2
+	move.w	subfunction(a2),d0
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_vr_clip_rects
+	add.w	#24,a7
+
+	movem.l	(a7)+,d2/a1
+	used_d1
+	done_return
+
+
+* v_bez_qual - escape 5, sub-function 99, intin[0] = 32 (from special_5)
+* In:   a1      Parameter block
+*       a0      VDI struct
+v_bez_qual:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	intin(a1),a2
+	move.w	4(a2),d0			; percent
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_v_bez_qual
+	addq.l	#8,a7
+
+	movem.l	(a7)+,d2/a1
+	move.l	intout(a1),a2
+	move.w	d0,(a2)
+	move.l	control(a1),a2
+	move.w	#1,L_intout(a2)
 	used_d1
 	done_return
 

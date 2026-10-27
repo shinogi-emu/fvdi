@@ -116,6 +116,9 @@ long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
 int CDECL lib_vs_x_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values);
 long CDECL lib_vq_x_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
 void x_colours_close(Virtual *vwk);
+void CDECL lib_v_setrgb(Virtual *vwk, long type, short *intin);
+void CDECL lib_vr_clip_rects(Virtual *vwk, long subfunction, short *ptsin, short *ptsout, short *intout, Control *control);
+long CDECL lib_v_bez_qual(Virtual *vwk, long percent);
 
 /*
  * Entries below index 0 of a workstation's palette, holding the exact

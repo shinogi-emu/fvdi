@@ -51,6 +51,7 @@ transparent	equ	1		; Fall through?
 	xref	vr_transfer_bits,colour_entry
 	xref	set_colour_table,colour_table,inverse_table
 	xref	v_kill_outline
+	xref	v_setrgb,vr_clip_rects
 	xref	vqt_char_index
 
 
@@ -270,7 +271,8 @@ default_functions:
 	dc.l	0,nothing ; 135
 	dc.l	0,nothing
 	dc.l	0,nothing
-	dc.l	0,nothing
+	dc.w	0,0
+	dc.l	v_setrgb		; 138
 	dc.l	0,nothing
 	dc.l	0,nothing
 	dc.l	0,nothing
@@ -304,7 +306,8 @@ default_functions:
 	dc.l	0,nothing
 	dc.w	0,0
 	dc.l	vr_transfer_bits ; 170
-	dc.l	0,nothing
+	dc.w	4,1
+	dc.l	vr_clip_rects		; 171
 	dc.l	0,nothing
 	dc.l	0,nothing
 	dc.l	0,nothing

@@ -166,6 +166,21 @@ int CDECL lib_vq_color(Virtual *vwk, long pen, long flag, RGB *colour)
 
 
 /*
+ * A COLOR_ENTRY component runs 0-65535; the palette keeps VDI's 0-1000.
+ * Handing out the palette value as it stands made every fg/bg query read
+ * full intensity as 1000, 1.5% of the scale the caller expects.
+ */
+static unsigned short vdi_to_rgb16(short value)
+{
+    if (value <= 0)
+        return 0;
+    if (value >= 1000)
+        return 0xffff;
+    return (unsigned short)(((long)value * 65535L + 500) / 1000);
+}
+
+
+/*
  * Colour state NVDI defines per workstation that fVDI keeps beside it, not
  * in it.  Virtual is allocated by the drivers as well as by the engine, so
  * growing it would tie every driver binary to this engine's layout.
@@ -378,21 +393,6 @@ int CDECL lib_vs_bg_color(Virtual *vwk, long subfunction, long colour_space, COL
 }
 
 
-/*
- * A COLOR_ENTRY component runs 0-65535; the palette keeps VDI's 0-1000.
- * Handing out the palette value as it stands made every fg/bg query read
- * full intensity as 1000, 1.5% of the scale the caller expects.
- */
-static unsigned short vdi_to_rgb16(short value)
-{
-    if (value <= 0)
-        return 0;
-    if (value >= 1000)
-        return 0xffff;
-    return (unsigned short)(((long)value * 65535L + 500) / 1000);
-}
-
-
 long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
 {
     short *fg, *bg, index;
@@ -439,22 +439,165 @@ long CDECL lib_vq_bg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
 }
 
 
+
+/*
+ * Pixel values and colours, for v_color2value, v_value2color and
+ * v_color2nearest (204, sub-functions 0-2).
+ *
+ * The driver describes its pixels in its Device record (vq_scrninfo's):
+ * with a hardware colour table a pixel value is a palette entry; packed
+ * true colour lists, for each bit of each component, the bit of the pixel
+ * that holds it.  These work from that, so they suit every driver.
+ */
+static int truecolour(const Device *dev)
+{
+    return dev && dev->clut != 1 && dev->format == 2;
+}
+
+/* Place a component's top 'bits' bits where scrmap says */
+static unsigned long pack_component(unsigned short value, short bits, const short *where)
+{
+    unsigned long pixel = 0;
+    short i;
+
+    if (bits <= 0 || bits > 16)
+        return 0;
+    value >>= 16 - bits;
+    for (i = 0; i < bits; i++)
+    {
+        if ((value >> i) & 1)
+            pixel |= 1UL << where[i];
+    }
+
+    return pixel;
+}
+
+/* ...and back, widened to 16 bits by repeating the top bits */
+static unsigned short unpack_component(unsigned long pixel, short bits, const short *where)
+{
+    unsigned long value = 0, wide;
+    short i, have;
+
+    if (bits <= 0 || bits > 16)
+        return 0;
+    for (i = 0; i < bits; i++)
+    {
+        if ((pixel >> where[i]) & 1)
+            value |= 1UL << i;
+    }
+    wide = value;
+    for (have = bits; have < 16; have += bits)
+        wide = (wide << bits) | value;
+
+    return (unsigned short)(wide >> (have - 16));
+}
+
+/* The palette entry nearest a colour, by squared distance in VDI units */
+static long nearest_index(Virtual *vwk, const COLOR_RGB *rgb)
+{
+    Workstation *wk = vwk->real_address;
+    Colour *palette = wk->screen.palette.colours;
+    long r = ((long)rgb->red * 1000 + 32767) / 65535;
+    long g = ((long)rgb->green * 1000 + 32767) / 65535;
+    long b = ((long)rgb->blue * 1000 + 32767) / 65535;
+    long i, best = 0, best_d = 0x7fffffffL;
+
+    for (i = 0; i < wk->screen.palette.size; i++)
+    {
+        long dr = palette[i].vdi.red - r, dg = palette[i].vdi.green - g, db = palette[i].vdi.blue - b;
+        long d = dr * dr + dg * dg + db * db;
+
+        if (d < best_d)
+        {
+            best_d = d;
+            best = i;
+        }
+    }
+
+    return best;
+}
+
+static unsigned long colour_to_value(Virtual *vwk, const COLOR_RGB *rgb)
+{
+    const Device *dev = vwk->real_address->driver ? vwk->real_address->driver->device : 0;
+
+    if (truecolour(dev))
+        return pack_component(rgb->red, dev->bits.red, dev->scrmap.bitnumber.red) |
+               pack_component(rgb->green, dev->bits.green, dev->scrmap.bitnumber.green) |
+               pack_component(rgb->blue, dev->bits.blue, dev->scrmap.bitnumber.blue);
+
+    /* A palette: the hardware pen of the nearest entry */
+    return vwk->real_address->screen.palette.colours[nearest_index(vwk, rgb)].real;
+}
+
+/* 1 when the value could be described, 0 when not */
+static int value_to_colour(Virtual *vwk, unsigned long value, COLOR_RGB *rgb)
+{
+    Workstation *wk = vwk->real_address;
+    const Device *dev = wk->driver ? wk->driver->device : 0;
+    long i;
+
+    rgb->reserved = 0;
+    if (truecolour(dev))
+    {
+        rgb->red = unpack_component(value, dev->bits.red, dev->scrmap.bitnumber.red);
+        rgb->green = unpack_component(value, dev->bits.green, dev->scrmap.bitnumber.green);
+        rgb->blue = unpack_component(value, dev->bits.blue, dev->scrmap.bitnumber.blue);
+        return 1;
+    }
+    for (i = 0; i < wk->screen.palette.size; i++)
+    {
+        Colour *c = &wk->screen.palette.colours[i];
+
+        if ((unsigned long)c->real == value)
+        {
+            rgb->red = vdi_to_rgb16(c->vdi.red);
+            rgb->green = vdi_to_rgb16(c->vdi.green);
+            rgb->blue = vdi_to_rgb16(c->vdi.blue);
+            return 1;
+        }
+    }
+    rgb->red = rgb->green = rgb->blue = 0;
+
+    return 0;
+}
+
+
 int CDECL colour_entry(Virtual *vwk, long subfunction, short *intin, short *intout)
 {
-    (void) vwk;
-    (void) intin;
+    long space, rgb_space = 1;
+    unsigned long value;
+    COLOR_RGB rgb;
+
     switch ((int)subfunction)
     {
-    case 0:     /* v_color2value */
-        PUTS("v_color2value not yet supported\n");
+    case 0:     /* v_color2value: intin colour space + COLOR_ENTRY -> pixel value */
+        memcpy(&space, intin, sizeof(space));
+        if ((space != 0) && (space != 1))
+            value = 0;
+        else
+            value = colour_to_value(vwk, (const COLOR_RGB *)(intin + 2));
+        memcpy(intout, &value, sizeof(value));
         return 2;
 
-    case 1:     /* v_value2color */
-        PUTS("v_value2color not yet supported\n");
+    case 1:     /* v_value2color: pixel value -> colour space + COLOR_ENTRY */
+        memcpy(&value, intin, sizeof(value));
+        if (!value_to_colour(vwk, value, &rgb))
+            rgb_space = 0;
+        memcpy(intout, &rgb_space, sizeof(rgb_space));
+        memcpy(intout + 2, &rgb, sizeof(rgb));
         return 6;
 
-    case 2:     /* v_color2nearest */
-        PUTS("v_color2nearest not yet supported\n");
+    case 2:     /* v_color2nearest: the colour the screen would really show */
+        memcpy(&space, intin, sizeof(space));
+        if ((space != 0) && (space != 1))
+        {
+            memset(&rgb, 0, sizeof(rgb));
+            rgb_space = 0;
+        } else
+            value_to_colour(vwk, colour_to_value(vwk, (const COLOR_RGB *)(intin + 2)), &rgb);
+        memcpy(intout, &rgb_space, sizeof(rgb_space));
+        memcpy(intout + 2, &rgb, sizeof(rgb));
         return 6;
 
     case 3:     /* vq_px_format */
@@ -687,4 +830,143 @@ long CDECL lib_vq_x_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
         colour->rgb = x_default[subfunction];
 
     return 1;
+}
+
+
+/*
+ * v_setrgb (138, sub-function 0-3 = text, fill, line, marker): set that
+ * kind of object's colour from red, green and blue in tenths of a percent.
+ * NVDI 5's own description: the same as vs_fg_color in VDI units.
+ */
+void CDECL lib_v_setrgb(Virtual *vwk, long type, short *intin)
+{
+    COLOR_ENTRY colour;
+
+    if ((type < 0) || (type > 3))
+        return;
+    colour.rgb.reserved = 0;
+    colour.rgb.red = vdi_to_rgb16(intin[0]);
+    colour.rgb.green = vdi_to_rgb16(intin[1]);
+    colour.rgb.blue = vdi_to_rgb16(intin[2]);
+    lib_vs_fg_color(vwk, type, 1, &colour);
+}
+
+
+/*
+ * vr_clip_rects_by_dst / _by_src (171, sub-functions 0 and 1) and their
+ * 32-bit forms (2 and 3): clip one of a source and destination rectangle
+ * pair and bring the other along, scaling where the two differ in size.
+ * Discrete, inclusive coordinates.  intout[0] is 1 when something is left
+ * and 0 when the clip leaves nothing.
+ */
+typedef struct { long x1, y1, x2, y2; } Rect;
+
+/* map [n1..n2] of the clipped side's [a1..a2] onto the other side's [b1..b2] */
+static void bring_along(long a1, long a2, long n1, long n2, long b1, long b2, long *m1, long *m2)
+{
+    long sa = a2 - a1 + 1, sb = b2 - b1 + 1;
+
+    if (sa == sb)
+    {
+        *m1 = b1 + (n1 - a1);
+        *m2 = b1 + (n2 - a1);
+    } else
+    {
+        *m1 = b1 + (long)(((long long)(n1 - a1) * sb) / sa);
+        *m2 = b1 + (long)(((long long)(n2 - a1 + 1) * sb - 1) / sa);
+    }
+}
+
+static int clip_pair(const Rect *clip, const Rect *clipped_side, const Rect *other, Rect *out_clipped, Rect *out_other)
+{
+    Rect n;
+
+    n.x1 = clipped_side->x1 > clip->x1 ? clipped_side->x1 : clip->x1;
+    n.y1 = clipped_side->y1 > clip->y1 ? clipped_side->y1 : clip->y1;
+    n.x2 = clipped_side->x2 < clip->x2 ? clipped_side->x2 : clip->x2;
+    n.y2 = clipped_side->y2 < clip->y2 ? clipped_side->y2 : clip->y2;
+    if ((n.x1 > n.x2) || (n.y1 > n.y2) ||
+        (clipped_side->x1 > clipped_side->x2) || (clipped_side->y1 > clipped_side->y2) ||
+        (other->x1 > other->x2) || (other->y1 > other->y2))
+        return 0;
+
+    *out_clipped = n;
+    bring_along(clipped_side->x1, clipped_side->x2, n.x1, n.x2, other->x1, other->x2, &out_other->x1, &out_other->x2);
+    bring_along(clipped_side->y1, clipped_side->y2, n.y1, n.y2, other->y1, other->y2, &out_other->y1, &out_other->y2);
+
+    return 1;
+}
+
+void CDECL lib_vr_clip_rects(Virtual *vwk, long subfunction, short *ptsin, short *ptsout, short *intout, Control *control)
+{
+    Rect r[3], src, dst;
+    long *l;
+    int i, ok, by_src, wide;
+
+    (void) vwk;
+    control->l_intout = 1;
+    intout[0] = 0;
+    if ((subfunction < 0) || (subfunction > 3))
+    {
+        control->l_ptsout = 0;
+        return;
+    }
+    wide = subfunction >= 2;
+    by_src = subfunction & 1;
+
+    for (i = 0; i < 3; i++)
+    {
+        if (wide)
+        {
+            l = (long *)ptsin + i * 4;
+            r[i].x1 = l[0]; r[i].y1 = l[1]; r[i].x2 = l[2]; r[i].y2 = l[3];
+        } else
+        {
+            r[i].x1 = ptsin[i * 4]; r[i].y1 = ptsin[i * 4 + 1];
+            r[i].x2 = ptsin[i * 4 + 2]; r[i].y2 = ptsin[i * 4 + 3];
+        }
+    }
+
+    /* r[0] is the clip, r[1] the source and r[2] the destination */
+    if (by_src)
+        ok = clip_pair(&r[0], &r[1], &r[2], &src, &dst);
+    else
+        ok = clip_pair(&r[0], &r[2], &r[1], &dst, &src);
+    if (!ok)
+        src = r[1], dst = r[2];
+
+    if (wide)
+    {
+        l = (long *)ptsout;
+        l[0] = src.x1; l[1] = src.y1; l[2] = src.x2; l[3] = src.y2;
+        l[4] = dst.x1; l[5] = dst.y1; l[6] = dst.x2; l[7] = dst.y2;
+        control->l_ptsout = 8;
+    } else
+    {
+        ptsout[0] = (short)src.x1; ptsout[1] = (short)src.y1; ptsout[2] = (short)src.x2; ptsout[3] = (short)src.y2;
+        ptsout[4] = (short)dst.x1; ptsout[5] = (short)dst.y1; ptsout[6] = (short)dst.x2; ptsout[7] = (short)dst.y2;
+        control->l_ptsout = 4;
+    }
+    intout[0] = (short)ok;
+}
+
+
+/*
+ * v_bez_qual (escape 5, sub-function 99, intin[0] = 32): Bezier quality
+ * in percent, 100 the finest.  fVDI subdivides Beziers to a depth scale,
+ * 0 the finest and 9 the coarsest; the percentage is mapped onto it, and
+ * the quality the scale really gives is returned.
+ */
+long CDECL lib_v_bez_qual(Virtual *vwk, long percent)
+{
+    long scale;
+
+    if (percent < 0)
+        percent = 0;
+    if (percent > 100)
+        percent = 100;
+    scale = ((100 - percent) * 9 + 50) / 100;
+    vwk->bezier.depth_scale = (short)scale;
+
+    return 100 - (scale * 100 + 4) / 9;
 }
