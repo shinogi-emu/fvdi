@@ -1086,7 +1086,7 @@ int lib_vq_extnd(Virtual *vwk, long subfunction, long flag, short *intout, short
         *intout++ = 0;   /*         -    "    -           */
         *intout++ = 2;   /* Beziers! */
         *intout++ = 0;   /* Unused */
-        *intout++ = 0;   /* 1 - bitmap scale, 2 - new raster functions, 4 - vr_clip_rects_xxx */
+        *intout++ = 4;   /* 1 - bitmap scale, 2 - new raster functions, 4 - vr_clip_rects_xxx */
         *intout++ = 0;   /* 9 from here used to be reserved */
         *intout++ = 1;   /* New style colour routines (at least some of them) */
         *intout++ = 0;

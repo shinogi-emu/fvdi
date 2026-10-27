@@ -37,6 +37,7 @@ transparent	equ	1		; Fall through?
 	xdef	vq_tabstatus,v_hardcopy,v_rmcur,v_form_adv
 	xdef	v_output_window,v_clear_disp_list,v_bit_image
 	xdef	start_unimpl,end_unimpl
+	xref	v_bez_qual
 	xdef	special_5,special_11
 	xdef	v_kill_outline
 
@@ -51,9 +52,16 @@ start_unimpl:
 
 * No known function
 nothing:
-special_5:
 special_11:
 	bra	redirect
+special_5:			; also every escape beyond the table
+	move.l	control(a1),a2
+	cmp.w	#99,subfunction(a2)	; v_bez_qual?
+	bne	redirect
+	move.l	intin(a1),a2
+	cmp.w	#32,(a2)
+	bne	redirect
+	bra	v_bez_qual
 
 * Physical workstation manipulation
 v_clrwk:
