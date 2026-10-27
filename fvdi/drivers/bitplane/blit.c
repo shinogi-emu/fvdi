@@ -471,85 +471,62 @@ static void do_blit(struct blit *blt)
             dst_addr += dst_x_inc >> 1;
         }
 
-        while (--xc > 0)
+        /*
+         * The words between the two ends: no masks, so the operation is
+         * all there is to it.  It is chosen here, once a row, rather than
+         * for every word.
+         */
+        if (xc > 1)
         {
-            if (src_x_inc >= 0)
-            {
-                blt_src_in <<= 16;
-                blt_src_in |= *src_addr;
-            } else
-            {
-                blt_src_in >>= 16;
-                blt_src_in |= (unsigned long)(*src_addr) << 16;
-            }
-            src_addr += src_x_inc >> 1;
+#define MIDDLE(EXPR) \
+            if (src_x_inc >= 0) \
+            { \
+                while (--xc > 0) \
+                { \
+                    blt_src_in = (blt_src_in << 16) | *src_addr; \
+                    src_addr += sxi; \
+                    s = blt_src_in >> skew; \
+                    d = *dst_addr; \
+                    *dst_addr = (EXPR); \
+                    dst_addr += dxi; \
+                } \
+            } else \
+            { \
+                while (--xc > 0) \
+                { \
+                    blt_src_in = (blt_src_in >> 16) | ((unsigned long)*src_addr << 16); \
+                    src_addr += sxi; \
+                    s = blt_src_in >> skew; \
+                    d = *dst_addr; \
+                    *dst_addr = (EXPR); \
+                    dst_addr += dxi; \
+                } \
+            } \
+            break;
 
-            /* Shift blt->skew times into blt_src_out */
-            blt_src_out = blt_src_in >> skew;
+            unsigned short s, d;
+            long sxi = src_x_inc >> 1, dxi = dst_x_inc >> 1;
 
             switch (blt->op)
             {
-            case 0:
-                blt_src_out = 0;
-                break;
-            case 4:
-                blt_src_out = ~blt_src_out;
-                /* fall through */
-            case 1:
-                blt_dst_in = *dst_addr;
-                blt_src_out = blt_src_out & blt_dst_in;
-                break;
-            case 2:
-                blt_dst_in = *dst_addr;
-                blt_src_out = blt_src_out & ~blt_dst_in;
-                break;
-            case 3:
-                break;
-            case 5:
-                blt_dst_in = *dst_addr;
-                blt_src_out = blt_dst_in;
-                break;
-            case 9:
-                blt_src_out = ~blt_src_out;
-                /* fall through */
-            case 6:
-                blt_dst_in = *dst_addr;
-                blt_src_out = blt_src_out ^ blt_dst_in;
-                break;
-            case 13:
-                blt_src_out = ~blt_src_out;
-                /* fall through */
-            case 7:
-                blt_dst_in = *dst_addr;
-                blt_src_out = blt_src_out | blt_dst_in;
-                break;
-            case 8:
-                blt_dst_in = *dst_addr;
-                blt_src_out = ~(blt_src_out | blt_dst_in);
-                break;
-            case 10:
-                blt_dst_in = *dst_addr;
-                blt_src_out = ~blt_dst_in;
-                break;
-            case 14:
-                blt_src_out = ~blt_src_out;
-                /* fall through */
-            case 11:
-                blt_dst_in = *dst_addr;
-                blt_src_out = blt_src_out | ~blt_dst_in;
-                break;
-            case 12:
-                blt_src_out = ~blt_src_out;
-                break;
-            case 15:
-                blt_src_out = 0xffff;
-                break;
-            default:
-                unreachable();
+            case 0:  MIDDLE(0)
+            case 1:  MIDDLE(s & d)
+            case 2:  MIDDLE(s & ~d)
+            case 3:  MIDDLE(s)
+            case 4:  MIDDLE(~s & d)
+            case 5:  MIDDLE(d)
+            case 6:  MIDDLE(s ^ d)
+            case 7:  MIDDLE(s | d)
+            case 8:  MIDDLE(~(s | d))
+            case 9:  MIDDLE(~s ^ d)
+            case 10: MIDDLE(~d)
+            case 11: MIDDLE(s | ~d)
+            case 12: MIDDLE(~s)
+            case 13: MIDDLE(~s | d)
+            case 14: MIDDLE(~s | ~d)
+            default: MIDDLE(0xffff)
             }
-
-            *dst_addr = blt_src_out;
-            dst_addr += dst_x_inc >> 1;
+#undef MIDDLE
         }
 
         /* Read source into blt_src_in */
@@ -945,6 +922,87 @@ static int setup_info(Workstation *wk, struct blit_frame *info, MFDB *src, MFDB 
 
 
 /*
+ * A plain copy (replace mode) between forms with the same number of
+ * interleaved planes, where source and destination sit at the same place
+ * in a word: no shifting, and every plane does the same.  The planes of a
+ * row are interleaved, so the whole middle of a row, in every plane, is
+ * one run of memory; only the two end words need masks.  This is what
+ * window moves and vertical scrolls are.
+ */
+static void copy_rows(const struct blit_frame *info)
+{
+    int planes = info->d_nxwd >> 1;
+    long x0 = info->d_xmin, x1 = info->d_xmin + info->b_wd - 1;
+    long words = (x1 >> 4) - (x0 >> 4);         /* after the first */
+    unsigned short lmask = 0xffff >> (x0 & 15);
+    unsigned short rmask = 0xffff << (15 - (x1 & 15));
+    long s_line = info->s_nxln >> 1, d_line = info->d_nxln >> 1;
+    unsigned short *s = info->s_form + info->s_ymin * s_line + (info->s_xmin >> 4) * planes;
+    unsigned short *d = info->d_form + info->d_ymin * d_line + (x0 >> 4) * planes;
+    long rows = info->b_ht, middle = (words - 1) * planes, k;
+    int backwards = 0;
+
+    if (s < d)
+    {
+        /* Bottom up, so that an overlap reads each row before it is written */
+        s += (rows - 1) * s_line;
+        d += (rows - 1) * d_line;
+        s_line = -s_line;
+        d_line = -d_line;
+        /* Within a row too, when the copy moves right along the same row */
+        backwards = info->s_ymin == info->d_ymin && info->s_form == info->d_form;
+    }
+    if (words == 0)
+        lmask &= rmask;
+
+    while (rows-- > 0)
+    {
+        unsigned short *sp, *dp;
+
+        if (words == 0)
+        {
+            for (k = 0; k < planes; k++)
+                d[k] = (d[k] & ~lmask) | (s[k] & lmask);
+        } else if (!backwards)
+        {
+            for (k = 0; k < planes; k++)
+                d[k] = (d[k] & ~lmask) | (s[k] & lmask);
+            sp = s + planes;
+            dp = d + planes;
+            for (k = middle; k >= 2; k -= 2)
+            {
+                *(unsigned long *)dp = *(unsigned long *)sp;
+                dp += 2;
+                sp += 2;
+            }
+            if (k)
+                *dp++ = *sp++;
+            for (k = 0; k < planes; k++)
+                dp[k] = (dp[k] & ~rmask) | (sp[k] & rmask);
+        } else
+        {
+            sp = s + (words * planes);
+            dp = d + (words * planes);
+            for (k = 0; k < planes; k++)
+                dp[k] = (dp[k] & ~rmask) | (sp[k] & rmask);
+            for (k = middle; k >= 2; k -= 2)
+            {
+                dp -= 2;
+                sp -= 2;
+                *(unsigned long *)dp = *(unsigned long *)sp;
+            }
+            if (k)
+                *--dp = *--sp;
+            for (k = 0; k < planes; k++)
+                d[k] = (d[k] & ~lmask) | (s[k] & lmask);
+        }
+        s += s_line;
+        d += d_line;
+    }
+}
+
+
+/*
  * copy raster opaque
  *
  * This function copies a rectangular raster area from source form to
@@ -967,6 +1025,12 @@ long CDECL c_blit_area(Virtual *vwk, MFDB *src, long src_x, long src_y, MFDB *ds
     /* Planes of source and destination must be equal in number */
     if (info.s_nxwd != info.d_nxwd)
         return 1;
+
+    if (operation == 3 && ((info.s_xmin ^ info.d_xmin) & 15) == 0 && w > 0 && h > 0)
+    {
+        copy_rows(&info);
+        return 1;
+    }
 
     info.op_tab[0] = operation;         /* fg:0 bg:0 */
     info.bg_col = 0;                    /* bg:0 & fg:0 => only first OP_TAB */
