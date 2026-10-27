@@ -6,7 +6,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -17,6 +17,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) -DRASTER_TEST_REZ=7 video_mode_guest.c -o $(TEST_BUILD)/MODE8.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer_guest.c -lgem -o $(TEST_BUILD)/RASTER.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) -DRASTER_BENCH_ONLY=1 transfer_guest.c -lgem -o $(TEST_BUILD)/BENCH.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) fontscan_guest.c -lgem -o $(TEST_BUILD)/FONTSCAN.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
 # A surviving emulator / successful screenshot is not a passing raster test.
@@ -46,3 +47,11 @@ check-bench-log:
 	! grep -Eq 'FVDI TRANSFER FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'RASTER MEMORY BENCH PASS' "$(GUEST_LOG)"
 	test "$$(grep -c 'TRANSFER BENCH' "$(GUEST_LOG)")" -eq 9
+
+# FONTSCAN.PRG: a font added at run time through the NVDI cookie's
+# scan_fonts/get_font_dir, as HighWire adds web fonts.  See the top of
+# fontscan_guest.c for the files it expects on C:.
+check-fontscan-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI FONTSCAN FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI FONTSCAN GUEST PASS' "$(GUEST_LOG)"
