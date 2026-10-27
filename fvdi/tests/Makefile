@@ -6,7 +6,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -19,6 +19,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) -DRASTER_BENCH_ONLY=1 transfer_guest.c -lgem -o $(TEST_BUILD)/BENCH.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) fontscan_guest.c -lgem -o $(TEST_BUILD)/FONTSCAN.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) colors_guest.c -lgem -o $(TEST_BUILD)/COLORS.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) bitmaps_guest.c -lgem -o $(TEST_BUILD)/BITMAPS.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
 # A surviving emulator / successful screenshot is not a passing raster test.
@@ -63,3 +64,10 @@ check-colors-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI COLORS FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI COLORS GUEST PASS' "$(GUEST_LOG)"
+
+# BITMAPS.PRG: off-screen bitmaps through v_opnbm, v_open_bm and
+# v_resize_bm.  Needs a 16-bit or deeper screen.
+check-bitmaps-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI BITMAPS FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI BITMAPS GUEST PASS' "$(GUEST_LOG)"
