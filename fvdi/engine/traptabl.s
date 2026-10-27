@@ -348,11 +348,11 @@ default_functions:
 	dc.l	set_colour_table
 	dc.w	0,0
 	dc.l	colour_table
-	dc.w	0,0
+	dc.w	0,1
 	dc.l	vs_x_color
 	dc.w	0,0
 	dc.l	inverse_table
-	dc.w	0,0
+	dc.w	0,6
 	dc.l	vq_x_color
 	dc.l	0,nothing
 	dc.l	0,nothing

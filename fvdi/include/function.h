@@ -113,6 +113,16 @@ int CDECL lib_vq_color(Virtual *vwk, long pen, long flag, RGB *colour);
 int CDECL lib_vs_fg_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values);
 int CDECL lib_vs_bg_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values);
 long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
+int CDECL lib_vs_x_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values);
+long CDECL lib_vq_x_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
+void x_colours_close(Virtual *vwk);
+
+/*
+ * Entries below index 0 of a workstation's palette, holding the exact
+ * colours set through the NVDI fg/bg calls: -2/-3 text, -4/-5 fill,
+ * -6/-7 line, -8/-9 marker, -10/-11 raster.
+ */
+#define NEG_PAL_N   11
 long CDECL lib_vq_bg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
 int CDECL colour_entry(Virtual *vwk, long subfunction, short *intin, short *intout);
 int CDECL set_colour_table(Virtual *vwk, long subfunction, short *intin);

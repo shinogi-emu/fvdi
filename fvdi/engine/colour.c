@@ -14,7 +14,6 @@
 #include "ctab.h"
 #include "itable.h"
 
-#define neg_pal_n  9
 
 
 static Colour *get_clut(Virtual *vwk)
@@ -30,7 +29,7 @@ static Colour *get_clut(Virtual *vwk)
     else if (!palette || ((long)palette & 1))
     {
         /* No or only negative palette allocated? */
-        addr = malloc((wk->screen.palette.size + neg_pal_n) * sizeof(Colour));
+        addr = malloc((wk->screen.palette.size + NEG_PAL_N) * sizeof(Colour));
         if (!addr)
         {
             PUTS("Could not allocate space for palette!\n");
@@ -40,14 +39,14 @@ static Colour *get_clut(Virtual *vwk)
             if (!palette)
             {
                 /* No palette allocated? */
-                palette = vwk->palette = (Colour *)(addr + neg_pal_n * sizeof(Colour));   /* Point to index 0 */
-                memset(addr, 0, neg_pal_n * sizeof(Colour));
+                palette = vwk->palette = (Colour *)(addr + NEG_PAL_N * sizeof(Colour));   /* Point to index 0 */
+                memset(addr, 0, NEG_PAL_N * sizeof(Colour));
             } else
             {                           /* Only negative palette allocated so far? */
                 palette = (Colour *)((long)palette & ~1);  /* Copy the negative side first and free it */
-                vwk->palette = (Colour *)(addr + neg_pal_n * sizeof(Colour));
-                copymem_aligned(palette - neg_pal_n, addr, neg_pal_n * sizeof(Colour));
-                free(palette - neg_pal_n);
+                vwk->palette = (Colour *)(addr + NEG_PAL_N * sizeof(Colour));
+                copymem_aligned(palette - NEG_PAL_N, addr, NEG_PAL_N * sizeof(Colour));
+                free(palette - NEG_PAL_N);
                 palette = vwk->palette;
             }
             copymem_aligned(wk->screen.palette.colours, palette, wk->screen.palette.size * sizeof(Colour));
@@ -166,7 +165,94 @@ int CDECL lib_vq_color(Virtual *vwk, long pen, long flag, RGB *colour)
 }
 
 
-static int fg_bg_index(Virtual *vwk, int subfunction, short **fg, short **bg)
+/*
+ * Colour state NVDI defines per workstation that fVDI keeps beside it, not
+ * in it.  Virtual is allocated by the drivers as well as by the engine, so
+ * growing it would tie every driver binary to this engine's layout.
+ *
+ * - The highlight, minimum, maximum and weight colours: vs_hilite_color,
+ *   vs_min_color, vs_max_color and vs_weight_color (opcode 207,
+ *   sub-functions 0 to 3) and their vq_ counterparts (209).  In NVDI they
+ *   parameterise vr_transfer_bits' arithmetic modes (highlight, add,
+ *   subtract, blend), which fVDI does not implement yet, so for now they
+ *   are held and reported back - before, the set calls claimed success and
+ *   kept nothing, and the queries always answered black.
+ * - The raster foreground and background colours: vsr_fg_color,
+ *   vsr_bg_color and their queries (200-203, sub-function 4).  These hold
+ *   palette indices like the text, fill, line and marker ones in Virtual.
+ */
+#define X_COLOURS   4
+
+typedef struct XColours {
+    struct XColours *next;
+    Virtual *owner;
+    COLOR_ENTRY colour[X_COLOURS];
+    short raster_fg, raster_bg;
+} XColours;
+
+static XColours *x_colours = 0;
+
+/*
+ * What a workstation answers before a program sets anything.  NVDI's own
+ * defaults are not documented; these are fVDI's choice: black highlight,
+ * black and white as the minimum and maximum, an even blend, and raster
+ * colours 1 on 0 (black on white) as for every other kind of object.
+ */
+static const COLOR_RGB x_default[X_COLOURS] = {
+    { 0, 0x0000, 0x0000, 0x0000 },   /* highlight */
+    { 0, 0x0000, 0x0000, 0x0000 },   /* minimum */
+    { 0, 0xffff, 0xffff, 0xffff },   /* maximum */
+    { 0, 0x8000, 0x8000, 0x8000 }    /* weight */
+};
+static short raster_default_fg = 1, raster_default_bg = 0;   /* only ever read */
+
+static XColours *x_colours_find(Virtual *vwk, int create)
+{
+    XColours *node;
+    int i;
+
+    for (node = x_colours; node; node = node->next)
+    {
+        if (node->owner == vwk)
+            return node;
+    }
+    if (!create)
+        return 0;
+
+    if ((node = (XColours *)malloc(sizeof(XColours))) == NULL)
+        return 0;
+    for (i = 0; i < X_COLOURS; i++)
+        node->colour[i].rgb = x_default[i];
+    node->raster_fg = raster_default_fg;
+    node->raster_bg = raster_default_bg;
+    node->owner = vwk;
+    node->next = x_colours;
+    x_colours = node;
+
+    return node;
+}
+
+/* Forget a workstation's colours: on close, and on open in case a program
+ * ended without closing one that had the same address. */
+void x_colours_close(Virtual *vwk)
+{
+    XColours **link = &x_colours;
+
+    while (*link)
+    {
+        XColours *node = *link;
+
+        if (node->owner == vwk)
+        {
+            *link = node->next;
+            free(node);
+        } else
+            link = &node->next;
+    }
+}
+
+
+static int fg_bg_index(Virtual *vwk, int subfunction, short **fg, short **bg, int create)
 {
     switch (subfunction)
     {
@@ -191,8 +277,22 @@ static int fg_bg_index(Virtual *vwk, int subfunction, short **fg, short **bg)
         break;
 
     case 4:
-        /* This will be for bitmaps */
-        return 0;
+        /* Raster operations: kept beside the workstation (see above) */
+        {
+            XColours *node = x_colours_find(vwk, create);
+
+            if (node)
+            {
+                *fg = &node->raster_fg;
+                *bg = &node->raster_bg;
+            } else if (!create)
+            {
+                *fg = &raster_default_fg;
+                *bg = &raster_default_bg;
+            } else
+                return 0;
+        }
+        break;
 
     default:
         return 0;
@@ -212,20 +312,20 @@ int CDECL lib_vs_fg_color(Virtual *vwk, long subfunction, long colour_space, COL
     if ((unsigned int)colour_space > 1)    /* Only 0 or 1 allowed for now (current or RGB) */
         return 0;
 
-    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg))
+    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg, 1))
         return -1;
     index = *fg = -subfunction * 2 - 2;      /* Index -2/-4... */
 
     palette = vwk->palette;
     if (!palette)
     {
-        addr = malloc(neg_pal_n * sizeof(Colour));
+        addr = malloc(NEG_PAL_N * sizeof(Colour));
         if (!addr)
         {
             PUTS("Could not allocate space for negative palette!\n");
             return -1;
         }
-        palette = vwk->palette = (Colour *)(((long)addr + neg_pal_n * sizeof(Colour)) | 1);   /* Point to index 0 */
+        palette = vwk->palette = (Colour *)(((long)addr + NEG_PAL_N * sizeof(Colour)) | 1);   /* Point to index 0 */
     }
     palette = (Colour *)((long)palette & ~1);
 
@@ -250,20 +350,20 @@ int CDECL lib_vs_bg_color(Virtual *vwk, long subfunction, long colour_space, COL
     if ((unsigned int)colour_space > 1)    /* Only 0 or 1 allowed for now (current or RGB) */
         return 0;
 
-    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg))
+    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg, 1))
         return -1;
     index = *bg = -subfunction * 2 - 3;      /* Index -3/-5... */
 
     palette = vwk->palette;
     if (!palette)
     {
-        addr = malloc(neg_pal_n * sizeof(Colour));
+        addr = malloc(NEG_PAL_N * sizeof(Colour));
         if (!addr)
         {
             PUTS("Could not allocate space for negative palette!\n");
             return -1;
         }
-        palette = vwk->palette = (Colour *)(((long)addr + neg_pal_n * sizeof(Colour)) | 1);   /* Point to index 0 */
+        palette = vwk->palette = (Colour *)(((long)addr + NEG_PAL_N * sizeof(Colour)) | 1);   /* Point to index 0 */
     }
     palette = (Colour *)((long)palette & ~1);
 
@@ -278,12 +378,27 @@ int CDECL lib_vs_bg_color(Virtual *vwk, long subfunction, long colour_space, COL
 }
 
 
+/*
+ * A COLOR_ENTRY component runs 0-65535; the palette keeps VDI's 0-1000.
+ * Handing out the palette value as it stands made every fg/bg query read
+ * full intensity as 1000, 1.5% of the scale the caller expects.
+ */
+static unsigned short vdi_to_rgb16(short value)
+{
+    if (value <= 0)
+        return 0;
+    if (value >= 1000)
+        return 0xffff;
+    return (unsigned short)(((long)value * 65535L + 500) / 1000);
+}
+
+
 long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
 {
     short *fg, *bg, index;
     Colour *palette;
 
-    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg))
+    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg, 0))
         return -1;
     index = *fg;
 
@@ -293,9 +408,9 @@ long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
     palette = (Colour *)((long)palette & ~1);
 
     colour->rgb.reserved = 0;
-    colour->rgb.red = palette[index].vdi.red;
-    colour->rgb.green = palette[index].vdi.green;
-    colour->rgb.blue = palette[index].vdi.blue;
+    colour->rgb.red = vdi_to_rgb16(palette[index].vdi.red);
+    colour->rgb.green = vdi_to_rgb16(palette[index].vdi.green);
+    colour->rgb.blue = vdi_to_rgb16(palette[index].vdi.blue);
 
     return 1;    /* RGB_SPACE */
 }
@@ -306,7 +421,7 @@ long CDECL lib_vq_bg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
     short *fg, *bg, index;
     Colour *palette;
 
-    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg))
+    if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg, 0))
         return -1;
     index = *bg;
 
@@ -316,9 +431,9 @@ long CDECL lib_vq_bg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
     palette = (Colour *)((long)palette & ~1);
 
     colour->rgb.reserved = 0;
-    colour->rgb.red = palette[index].vdi.red;
-    colour->rgb.green = palette[index].vdi.green;
-    colour->rgb.blue = palette[index].vdi.blue;
+    colour->rgb.red = vdi_to_rgb16(palette[index].vdi.red);
+    colour->rgb.green = vdi_to_rgb16(palette[index].vdi.green);
+    colour->rgb.blue = vdi_to_rgb16(palette[index].vdi.blue);
 
     return 1;    /* RGB_SPACE */
 }
@@ -534,4 +649,42 @@ int CDECL colour_table(Virtual *vwk, long subfunction, short *intin, short *into
         PUTS("Unknown colour table operation\n");
         return 0;
     }
+}
+
+
+/* -1 wrong sub-function, 0 not done (colour space or memory), 1 done */
+int CDECL lib_vs_x_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values)
+{
+    XColours *node;
+
+    if ((subfunction < 0) || (subfunction >= X_COLOURS))
+        return -1;
+    if ((colour_space != 0) && (colour_space != 1))     /* current or RGB */
+        return 0;
+    if ((node = x_colours_find(vwk, 1)) == NULL)
+        return 0;
+
+    node->colour[subfunction].rgb.reserved = 0;
+    node->colour[subfunction].rgb.red = values->rgb.red;
+    node->colour[subfunction].rgb.green = values->rgb.green;
+    node->colour[subfunction].rgb.blue = values->rgb.blue;
+
+    return 1;
+}
+
+/* Returns the colour space (1, RGB), or -1 for a wrong sub-function */
+long CDECL lib_vq_x_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
+{
+    XColours *node;
+
+    if ((subfunction < 0) || (subfunction >= X_COLOURS))
+        return -1;
+
+    node = x_colours_find(vwk, 0);
+    if (node)
+        colour->rgb = node->colour[subfunction].rgb;
+    else
+        colour->rgb = x_default[subfunction];
+
+    return 1;
 }
