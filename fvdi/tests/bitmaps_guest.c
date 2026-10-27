@@ -4,8 +4,9 @@
  *
  * Draws black bars into white bitmaps and checks the pixels where they
  * should change and where they should not, both in memory the test can
- * see and through v_get_pixel.  Needs a 16-bit (or deeper) screen, where
- * a cleared bitmap is white (0xffff) and black is 0x0000.
+ * see and through v_get_pixel.  Works on a 16-bit screen, where white is
+ * 0xffff and black 0x0000, and on interleaved planes (1, 2, 4 or 8),
+ * where white is pen 0 (every bit clear) and black has every bit set.
  *
  * Run under the AES.  Reports over BIOS device 1 (serial) and ends with
  * "FVDI BITMAPS GUEST PASS" or "FVDI BITMAPS FAIL: <check>".
@@ -41,7 +42,9 @@ void v_opnbm(short *work_in, MFDB *bitmap, short *handle, short *work_out);
 void v_clsbm(short handle);
 
 static int failed, skipped;
-static short screen;
+static short screen, planes;
+static unsigned short white_px, black_px;
+static unsigned char white_byte;
 static short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 };
 static short work_out[57];
 
@@ -79,9 +82,19 @@ static void black_bar(short h, short x1, short y1, short x2, short y2)
     v_bar(h, xy);
 }
 
+/* A pixel as memory holds it: 16 bits, or the bits of the planes as a pen */
 static unsigned short pixel_at(const unsigned char *base, long wrap, short x, short y)
 {
-    return *(const unsigned short *)(base + (long)y * wrap + (long)x * 2);
+    const unsigned short *w;
+    unsigned short v = 0;
+    short k;
+
+    if (planes == 16)
+        return *(const unsigned short *)(base + (long)y * wrap + (long)x * 2);
+    w = (const unsigned short *)(base + (long)y * wrap) + (x >> 4) * planes;
+    for (k = 0; k < planes; k++)
+        v |= ((w[k] >> (15 - (x & 15))) & 1) << k;
+    return v;
 }
 
 static short pel_at(short h, short x, short y)
@@ -103,7 +116,7 @@ int main(void)
     static unsigned char raw1[256 * 60 + 64], raw2[512 * 90 + 64];
     unsigned char *mem1 = aligned(raw1), *mem2 = aligned(raw2);
     char line[200];
-    short cw, ch, bw, bh, h, h2, white, black, planes;
+    short cw, ch, bw, bh, h, h2, white, black;
     long space;
     unsigned long px_format;
     GCBITMAP bm;
@@ -120,12 +133,23 @@ int main(void)
     snprintf(line, sizeof(line), "BITMAPS screen planes %d", work_out[4]);
     say(line);
     planes = work_out[4];
-    if (planes < 16)
+    if (planes != 1 && planes != 2 && planes != 4 && planes != 8 && planes != 16)
     {
-        /* The pixel checks below read 16-bit pixels */
-        say("BITMAPS screen under 16 bits: skipped");
+        /* The pixel checks below read 16-bit pixels or interleaved planes */
+        say("BITMAPS screen of another depth: skipped");
         skipped = 1;
         goto out;
+    }
+    if (planes == 16)
+    {
+        white_px = 0xffff;
+        black_px = 0;
+        white_byte = 0xff;
+    } else
+    {
+        white_px = 0;
+        black_px = (1 << planes) - 1;
+        white_byte = 0;
     }
     space = vq_px_format(screen, &px_format);
     snprintf(line, sizeof(line), "BITMAPS colour space %ld, px_format %08lx", space, px_format);
@@ -151,11 +175,11 @@ int main(void)
     say(line);
     check(mfdb.fd_addr && mfdb.fd_w == 64 && mfdb.fd_h == 32 && mfdb.fd_wdwidth == 4,
           "v_opnbm filled in the MFDB");
-    white = pixel_at(mfdb.fd_addr, 128, 10, 10);
+    white = pixel_at(mfdb.fd_addr, 64L * planes / 8, 10, 10);
     black_bar(h, 8, 8, 12, 12);
-    check(white == (short) 0xffff, "v_opnbm bitmap starts white");
-    check(pixel_at(mfdb.fd_addr, 128, 10, 10) == 0, "bar drawn in the v_opnbm bitmap");
-    check(pixel_at(mfdb.fd_addr, 128, 20, 10) == 0xffff, "and only there");
+    check((unsigned short)white == white_px, "v_opnbm bitmap starts white");
+    check(pixel_at(mfdb.fd_addr, 64L * planes / 8, 10, 10) == black_px, "bar drawn in the v_opnbm bitmap");
+    check(pixel_at(mfdb.fd_addr, 64L * planes / 8, 20, 10) == white_px, "and only there");
     v_clsbm(h);
 
     /* v_open_bm, empty GCBITMAP: fVDI allocates, fills it in */
@@ -170,11 +194,11 @@ int main(void)
              bm.magic, bm.addr, bm.width, bm.bits, bm.px_format, bm.xmin, bm.ymin, bm.xmax, bm.ymax);
     say(line);
     check(bm.magic == 0x6362746dL && bm.length == sizeof(GCBITMAP), "GCBITMAP filled in");
-    check(bm.addr && bm.width >= 112 * 2 && bm.xmax == 112 && bm.ymax == 50, "size and line width");
+    check(bm.addr && bm.width >= 112L * planes / 8 && bm.xmax == 112 && bm.ymax == 50, "size and line width");
     check(bm.bits == planes && bm.px_format == px_format, "screen depth and format");
     black_bar(h, 50, 20, 59, 29);
-    check(pixel_at(bm.addr, bm.width, 55, 25) == 0, "bar drawn in the v_open_bm bitmap");
-    check(pixel_at(bm.addr, bm.width, 70, 25) == 0xffff, "and only there");
+    check(pixel_at(bm.addr, bm.width, 55, 25) == black_px, "bar drawn in the v_open_bm bitmap");
+    check(pixel_at(bm.addr, bm.width, 70, 25) == white_px, "and only there");
     black = pel_at(h, 55, 25);
     white = pel_at(h, 70, 25);
     snprintf(line, sizeof(line), "BITMAPS v_get_pixel black %04x white %04x", black, white);
@@ -188,22 +212,22 @@ int main(void)
     check(pel_at(h, 170, 75) == white, "new pixels start white");
 
     /* v_resize_bm into the caller's memory, with a wide line */
-    memset(mem2, 0xff, 512 * 90);
+    memset(mem2, white_byte, 512 * 90);
     check(v_resize_bm(h, 200, 90, 512, mem2) == 1, "v_resize_bm into caller memory, 512-byte lines");
     black_bar(h, 150, 85, 159, 89);
-    check(pixel_at(mem2, 512, 155, 87) == 0, "bar landed in the caller's memory");
-    check(pixel_at(mem2, 512, 165, 87) == 0xffff, "and only there");
-    check(v_resize_bm(h, 200, 90, 100, mem2) == 0, "too narrow a line is refused");
-    check(pixel_at(mem2, 512, 155, 87) == 0, "and the bitmap is still there");
+    check(pixel_at(mem2, 512, 155, 87) == black_px, "bar landed in the caller's memory");
+    check(pixel_at(mem2, 512, 165, 87) == white_px, "and only there");
+    check(v_resize_bm(h, 200, 90, 16, mem2) == 0, "too narrow a line is refused");
+    check(pixel_at(mem2, 512, 155, 87) == black_px, "and the bitmap is still there");
     black_bar(h, 0, 0, 3, 3);
-    check(pixel_at(mem2, 512, 1, 1) == 0, "still drawing into it");
+    check(pixel_at(mem2, 512, 1, 1) == black_px, "still drawing into it");
     v_clsbm(h);
 
     check(v_resize_bm(screen, 100, 100, 0, NULL) == 0, "v_resize_bm refuses a screen workstation");
 
     /* v_open_bm into the caller's memory, own colour table */
     memset(&bm, 0, sizeof(bm));
-    memset(mem1, 0xff, 256 * 60);
+    memset(mem1, white_byte, 256 * 60);
     bm.addr = mem1;
     bm.width = 256;
     bm.xmax = 100;
@@ -213,8 +237,8 @@ int main(void)
     if (h > 0)
     {
         black_bar(h, 90, 50, 95, 55);
-        check(pixel_at(mem1, 256, 92, 52) == 0, "bar landed in the caller's memory");
-        check(pixel_at(mem1, 256, 97, 52) == 0xffff, "and only there");
+        check(pixel_at(mem1, 256, 92, 52) == black_px, "bar landed in the caller's memory");
+        check(pixel_at(mem1, 256, 97, 52) == white_px, "and only there");
         check(bm.addr == mem1, "caller's GCBITMAP left alone");
         v_clsbm(h);
     }
@@ -236,6 +260,78 @@ int main(void)
                  work_out[0] + 1, work_out[1] + 1, work_out[3], work_out[4]);
         say(line);
         check(work_out[3] == 282 && work_out[4] == 282, "90 dpi became 282 microns");
+        v_clsbm(h);
+    }
+
+    /*
+     * Copies between a bitmap and the screen, word aligned and shifted:
+     * the two forms have different line widths, and the copy must land
+     * where it is put and nowhere else.
+     */
+    memset(&bm, 0, sizeof(bm));
+    bm.xmax = 64;
+    bm.ymax = 32;
+    h = v_open_bm(screen, &bm, 1, 0, 0, 0);
+    check(h > 0, "v_open_bm handle (64x32, for copies)");
+    if (h > 0)
+    {
+        MFDB bmf, scr;
+        short white_box[4] = { 180, 90, 300, 140 }, xy[8], dx;
+
+        memset(&bmf, 0, sizeof(bmf));
+        memset(&scr, 0, sizeof(scr));
+        bmf.fd_addr = bm.addr;
+        bmf.fd_w = (short)bm.xmax;
+        bmf.fd_h = (short)bm.ymax;
+        bmf.fd_wdwidth = (short)(bm.width * 8 / planes / 16);
+        bmf.fd_nplanes = planes;
+        black_bar(h, 8, 4, 39, 11);
+        graf_mouse(M_OFF, 0);
+        wind_update(BEG_UPDATE);
+        for (dx = 0; dx < 2; dx++)
+        {
+            short x0 = dx ? 203 : 208;
+
+            vswr_mode(screen, 1);
+            vsf_interior(screen, 1);
+            vsf_color(screen, 0);
+            vsf_perimeter(screen, 0);
+            v_bar(screen, white_box);
+            xy[0] = 0;
+            xy[1] = 0;
+            xy[2] = 63;
+            xy[3] = 31;
+            xy[4] = x0;
+            xy[5] = 100;
+            xy[6] = x0 + 63;
+            xy[7] = 131;
+            vro_cpyfm(screen, S_ONLY, xy, &bmf, &scr);
+            check(pel_at(screen, x0 + 8, 104) == black && pel_at(screen, x0 + 39, 111) == black,
+                  dx ? "bitmap to screen, shifted: the bar arrives" : "bitmap to screen, aligned: the bar arrives");
+            check(pel_at(screen, x0 + 7, 104) == white && pel_at(screen, x0 + 40, 111) == white &&
+                  pel_at(screen, x0 - 1, 104) == white && pel_at(screen, x0 + 64, 104) == white,
+                  dx ? "bitmap to screen, shifted: nothing beside it" : "bitmap to screen, aligned: nothing beside it");
+        }
+        /* and back: the screen's bar into the bitmap, 5 pixels further on */
+        memset(bm.addr, white_byte, bm.width * bm.ymax);
+        xy[0] = 203;
+        xy[1] = 100;
+        xy[2] = 203 + 47;
+        xy[3] = 131;
+        xy[4] = 5;
+        xy[5] = 0;
+        xy[6] = 5 + 47;
+        xy[7] = 31;
+        vro_cpyfm(screen, S_ONLY, xy, &scr, &bmf);
+        check(pixel_at(bm.addr, bm.width, 13, 4) == black_px && pixel_at(bm.addr, bm.width, 44, 11) == black_px,
+              "screen to bitmap, shifted: the bar arrives");
+        check(pixel_at(bm.addr, bm.width, 12, 4) == white_px && pixel_at(bm.addr, bm.width, 45, 11) == white_px &&
+              pixel_at(bm.addr, bm.width, 4, 4) == white_px,
+              "screen to bitmap, shifted: nothing beside it");
+        vsf_color(screen, 0);
+        v_bar(screen, white_box);
+        wind_update(END_UPDATE);
+        graf_mouse(M_ON, 0);
         v_clsbm(h);
     }
 
