@@ -12,6 +12,7 @@
 #include "relocate.h"
 #include "utility.h"
 #include "globals.h"
+#include "ctab.h"
 
 
 
@@ -163,19 +164,416 @@ static short find_free_handle(Virtual ***handle_entry)
 
 
 /* Needs to deal with virtuals on non-screen workstations! */
+
+/*
+ * Off-screen bitmaps
+ * ==================
+ *
+ * A bitmap workstation is one allocation: its Virtual, 32 bytes of user
+ * fill pattern, its own copy of the Workstation it was opened from, and,
+ * unless the caller supplied the pixels, the pixels themselves.
+ *
+ * Two things can come to live outside that block, and are remembered here
+ * so v_clsvwk can free them: the pixels of a bitmap v_resize_bm gave a new
+ * size, and the colour table of a v_open_bm bitmap asked to have its own.
+ */
+typedef struct BitmapExtra {
+    struct BitmapExtra *next;
+    Virtual *owner;
+    void *pixels;               /* from v_resize_bm, or NULL */
+    Colour *palette;            /* own colour table, or NULL */
+} BitmapExtra;
+
+static BitmapExtra *bitmap_extras = 0;
+
+
+static BitmapExtra *bitmap_extra(Virtual *vwk, int create)
+{
+    BitmapExtra *node;
+
+    for (node = bitmap_extras; node; node = node->next)
+    {
+        if (node->owner == vwk)
+            return node;
+    }
+    if (!create || (node = (BitmapExtra *)malloc(sizeof(BitmapExtra))) == NULL)
+        return 0;
+    node->owner = vwk;
+    node->pixels = 0;
+    node->palette = 0;
+    node->next = bitmap_extras;
+    bitmap_extras = node;
+
+    return node;
+}
+
+
+static void bitmap_extra_close(Virtual *vwk)
+{
+    BitmapExtra **link = &bitmap_extras;
+
+    while (*link)
+    {
+        BitmapExtra *node = *link;
+
+        if (node->owner == vwk)
+        {
+            *link = node->next;
+            if (node->pixels)
+                free(node->pixels);
+            if (node->palette)
+                free(node->palette);
+            free(node);
+        } else
+            link = &node->next;
+    }
+}
+
+
+/* A bitmap workstation's Workstation follows its Virtual and fill pattern */
+static int is_bitmap_vwk(Virtual *vwk)
+{
+    return vwk->real_address == (Workstation *)((long)vwk + sizeof(Virtual) + 32);
+}
+
+
+/*
+ * Build an off-screen bitmap workstation modelled on wk: width x height
+ * pixels (the width rounded up to 16), bitplanes deep.  'pixels' is the
+ * caller's memory, or NULL for a cleared area allocated with the
+ * workstation; 'wrap' is the bytes in a line, 0 for the least that fits.
+ * The pixel size is in microns.  Returns the Virtual, or NULL.
+ */
+static Virtual *new_bitmap_vwk(Workstation *wk, short width, short height, short bitplanes,
+                               short *pixels, long wrap, short pixel_width, short pixel_height)
+{
+    long extra_size = 32 + sizeof(Virtual) + sizeof(Workstation);
+    long size;
+    Virtual *new_vwk;
+    Workstation *new_wk;
+
+    width = (width + 15) & 0xfff0;
+    if (!wrap)
+        wrap = (long)(width >> 3) * bitplanes;	/* >> 4 in assembly file */
+    size = wrap * height;
+
+    if (!pixels)
+        extra_size += size;
+
+    /* New vwk, but it should really not always be for this driver! */
+    if ((new_vwk = malloc(extra_size)) == NULL)
+    {
+        PRINTF(("v_opnbm: out of memory (%ld)\n", extra_size));
+        return NULL;
+    }
+
+    new_wk = (Workstation *)((long)new_vwk + sizeof(Virtual) + 32);
+    copymem(wk, new_wk, sizeof(Workstation));
+    copymem(wk->driver->default_vwk, new_vwk, sizeof(Virtual));
+
+    if (!pixels)
+    {
+        pixels = (short *)((long)new_wk + sizeof(Workstation));
+        memset(pixels, bitplanes > 8 ? -1 : 0, size);
+    }
+
+    new_wk->screen.mfdb.address = pixels;
+    new_wk->screen.mfdb.width = width;
+    new_wk->screen.mfdb.height = height;
+    new_wk->screen.mfdb.wdwidth = wrap / (2 * bitplanes);	/* width >> 4 when wrap is the least */
+    new_wk->screen.mfdb.bitplanes = bitplanes;
+    new_wk->screen.mfdb.reserved[0] = 0;
+    new_wk->screen.mfdb.reserved[1] = 0;
+    new_wk->screen.mfdb.reserved[2] = 0;
+    new_wk->screen.mfdb.standard = 0;
+
+    new_wk->screen.type = 0;
+    new_wk->screen.wrap = wrap;
+    new_wk->screen.shadow.buffer = 0;
+    new_wk->screen.shadow.address = 0;
+    new_wk->screen.shadow.wrap = 0;
+
+    new_wk->screen.pixel.width = pixel_width;
+    new_wk->screen.pixel.height = pixel_height;
+
+    new_wk->screen.coordinates.course = 0;	/* ? */
+    new_wk->screen.coordinates.min_x = 0;
+    new_wk->screen.coordinates.min_y = 0;
+    new_wk->screen.coordinates.max_x = width - 1;
+    new_wk->screen.coordinates.max_y = height - 1;
+
+    /* Probably OK to mark all these as unavailable */
+    new_wk->various.input_type = 0;
+    new_wk->various.inking = 0;
+    new_wk->various.buttons = 0;
+    new_wk->various.cursor_movement = 0;
+    new_wk->various.number_entry = 0;
+    new_wk->various.selection = 0;
+    new_wk->various.typing = 0;
+    new_wk->various.workstation_type = 0;
+    new_wk->mouse.type = 0;				/* Enough? */
+
+    new_vwk->real_address = new_wk;
+
+    return new_vwk;
+}
+
+
+static void open_vwk_finish(Virtual *vwk, Workstation *wk, short hnd, Virtual **handle_entry, VDIpars *pars);
+
+
+/*
+ * v_open_bm (100, sub 3): NVDI's off-screen bitmap from a GCBITMAP.
+ *
+ * The bitmap is in the format of the screen, as NVDI's are; a GCBITMAP
+ * asking for another pixel format or depth is refused.  With no GCBITMAP,
+ * or an empty one, the bitmap is the size of base_handle's screen and
+ * fVDI allocates it; an empty GCBITMAP is then filled in.
+ *
+ * intin[0] bit 0 set shares base_handle's colour table, clear gives the
+ * bitmap a copy of its own; intin[1..3] are the pixel size and its unit.
+ * The only result is the handle, in contrl[6] - intout is one word long,
+ * so the workstation information v_opnvwk returns goes nowhere.
+ */
+static void v_open_bm(Virtual *vwk, VDIpars *pars)
+{
+    static short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 };
+    short intout[57], ptsout[12];
+    Control control;
+    VDIpars inner;
+    GCBITMAP *bm;
+    Workstation *wk = vwk->real_address;
+    Virtual *new_vwk, **handle_entry;
+    short bits, colour_flags, unit, hnd;
+    long width, height, wrap = 0, size, pixel_width, pixel_height;
+    unsigned long format;
+    short *pixels = NULL;
+
+    pars->control->handle = 0;          /* Assume failure */
+    if (pars->control->l_intin < 4)
+        return;
+    bm = (GCBITMAP *)pars->control->addr1;
+    colour_flags = pars->intin[0];
+    if (colour_flags & ~1)              /* Only bit 0 is defined */
+        return;
+
+    bits = wk->screen.mfdb.bitplanes;
+    format = ctab_pixel_format(vwk);
+    width = wk->screen.mfdb.width;
+    height = wk->screen.mfdb.height;
+    if (bm)
+    {
+        if (bm->px_format && bm->px_format != format)
+            return;
+        if (bm->bits && bm->bits != bits)
+            return;
+        if (bm->addr)
+        {
+            width = bm->xmax - bm->xmin;
+            height = bm->ymax - bm->ymin;
+            if ((width <= 0) || (height <= 0) ||
+                (bm->width < (((width + 15) & ~15L) >> 3) * bits) || (bm->width & 1))
+                return;
+            pixels = (short *)bm->addr;
+            wrap = bm->width;
+        } else if (bm->xmin || bm->ymin || bm->xmax || bm->ymax)
+        {
+            width = bm->xmax - bm->xmin;
+            height = bm->ymax - bm->ymin;
+            if ((width <= 0) || (height <= 0))
+                return;
+        }
+    }
+    if ((width > 0x7fff - 15) || (height > 0x7fff))
+        return;
+
+    /* The pixel size, in microns; 0 takes base_handle's */
+    unit = pars->intin[1];
+    pixel_width = pars->intin[2];
+    pixel_height = pars->intin[3];
+    if ((pixel_width > 0) && (pixel_height > 0))
+    {
+        switch (unit)
+        {
+        case -1:                        /* dpi */
+            pixel_width = (25400L + pixel_width / 2) / pixel_width;
+            pixel_height = (25400L + pixel_height / 2) / pixel_height;
+            break;
+        case 0:                         /* microns */
+            break;
+        case 1:                         /* 1/10 micron */
+        case 2:                         /* 1/100 */
+        case 3:                         /* 1/1000 */
+            size = unit == 1 ? 10 : unit == 2 ? 100 : 1000;
+            pixel_width = (pixel_width + size / 2) / size;
+            pixel_height = (pixel_height + size / 2) / size;
+            break;
+        default:
+            return;
+        }
+    }
+    if ((pixel_width <= 0) || (pixel_height <= 0))
+    {
+        pixel_width = wk->screen.pixel.width;
+        pixel_height = wk->screen.pixel.height;
+    }
+
+    if ((hnd = find_free_handle(&handle_entry)) == 0)
+        return;
+    new_vwk = new_bitmap_vwk(wk, (short)width, (short)height, bits, pixels, wrap,
+                             (short)pixel_width, (short)pixel_height);
+    if (!new_vwk)
+        return;
+
+    if (!(colour_flags & 1))
+    {
+        /* A colour table of its own: what the screen does later is not its business */
+        Workstation *new_wk = new_vwk->real_address;
+        BitmapExtra *extra = bitmap_extra(new_vwk, 1);
+        long n = wk->screen.palette.size;
+        Colour *palette = n > 0 ? (Colour *)malloc(n * sizeof(Colour)) : NULL;
+
+        if (!extra || (n > 0 && !palette))
+        {
+            if (palette)
+                free(palette);
+            bitmap_extra_close(new_vwk);
+            free(new_vwk);
+            return;
+        }
+        if (palette)
+        {
+            copymem(wk->screen.palette.colours, palette, n * sizeof(Colour));
+            new_wk->screen.palette.colours = palette;
+            extra->palette = palette;
+        }
+    }
+
+    control = *pars->control;
+    control.l_intin = 11;
+    inner.control = &control;
+    inner.intin = work_in;
+    inner.ptsin = pars->ptsin;
+    inner.intout = intout;
+    inner.ptsout = ptsout;
+    open_vwk_finish(new_vwk, new_vwk->real_address, hnd, handle_entry, &inner);
+    pars->control->handle = control.handle;
+
+    if (bm && !bm->addr)
+    {
+        /* fVDI allocated it: describe what was made */
+        Workstation *new_wk = new_vwk->real_address;
+
+        bm->magic = 0x6362746dL;        /* 'cbtm' */
+        bm->length = sizeof(GCBITMAP);
+        bm->format = 0;
+        bm->reserved = 0;
+        bm->addr = (unsigned char *)new_wk->screen.mfdb.address;
+        bm->width = new_wk->screen.wrap;
+        bm->bits = bits;
+        bm->px_format = format;
+        bm->xmin = 0;
+        bm->ymin = 0;
+        bm->xmax = new_wk->screen.mfdb.width;
+        bm->ymax = new_wk->screen.mfdb.height;
+        bm->ctab = 0;
+        bm->itab = 0;
+        bm->reserved0 = 0;
+        bm->reserved1 = 0;
+    }
+}
+
+
+/*
+ * v_resize_bm (100, sub 2): give a bitmap from v_opnbm or v_open_bm a new
+ * size, in new pixels - fVDI's, or the caller's at intin[4..5] with
+ * intin[2..3] bytes to a line.  intout[0] is 1 when done, 0 when not.
+ *
+ * NVDI releases the old pixels first, so a failure leaves the bitmap
+ * without any.  fVDI only lets go of the old ones once the new ones are
+ * in place, so a failure leaves the bitmap as it was.
+ */
+static void v_resize_bm(Virtual *vwk, VDIpars *pars)
+{
+    Workstation *wk = vwk->real_address;
+    BitmapExtra *extra;
+    short width, height, bitplanes;
+    long wrap, least, size;
+    short *pixels;
+    void *block = NULL;
+
+    pars->intout[0] = 0;
+    if (!is_bitmap_vwk(vwk) || (pars->control->l_intin < 4))
+        return;
+    width = pars->intin[0];
+    height = pars->intin[1];
+    wrap = pars->control->l_intin >= 6 ? *(long *)&pars->intin[2] : 0;
+    pixels = pars->control->l_intin >= 6 ? *(short **)&pars->intin[4] : NULL;
+    if ((width <= 0) || (height <= 0) || (width > 0x7fff - 15))
+        return;
+
+    bitplanes = wk->screen.mfdb.bitplanes;
+    width = (width + 15) & 0xfff0;
+    least = (long)(width >> 3) * bitplanes;
+    if (pixels)
+    {
+        if ((wrap < least) || (wrap & 1))
+            return;
+    } else
+    {
+        /* NVDI's rule for caller memory: a 16-byte boundary, 16 bytes spare each side */
+        wrap = least;
+        size = wrap * height;
+        if ((block = malloc(size + 48)) == NULL)
+            return;
+        pixels = (short *)(((long)block + 16 + 15) & ~15L);
+        memset(pixels, bitplanes > 8 ? -1 : 0, size);
+    }
+
+    if ((extra = bitmap_extra(vwk, 1)) == NULL)
+    {
+        if (block)
+            free(block);
+        return;
+    }
+    if (extra->pixels)
+        free(extra->pixels);
+    extra->pixels = block;
+
+    wk->screen.mfdb.address = pixels;
+    wk->screen.mfdb.width = width;
+    wk->screen.mfdb.height = height;
+    wk->screen.mfdb.wdwidth = wrap / (2 * bitplanes);
+    wk->screen.wrap = wrap;
+    wk->screen.coordinates.max_x = width - 1;
+    wk->screen.coordinates.max_y = height - 1;
+    lib_vs_clip(vwk, vwk->clip.on, &vwk->clip.rectangle.x1);   /* within the new size */
+
+    pars->intout[0] = 1;
+}
+
+
 void CDECL v_opnvwk(Virtual *vwk, VDIpars *pars)
 {
     short *intin;
-    short hnd, width, height, bitplanes, lwidth, dummy;
+    short hnd, width, height, bitplanes;
     long extra_size;
-    long size;
     Workstation *wk, *new_wk;
     Virtual *new_vwk, **handle_entry;
     MFDB *mfdb;
     long colors;
     short format;
     short bit_order;
-    unsigned short c;
+
+    switch (pars->control->subfunction)
+    {
+    case 2:
+        v_resize_bm(vwk, pars);
+        return;
+    case 3:
+        v_open_bm(vwk, pars);
+        return;
+    }
 
     pars->control->handle = 0;	/* Assume failure */
     if ((hnd = find_free_handle(&handle_entry)) == 0)
@@ -238,8 +636,6 @@ void CDECL v_opnvwk(Virtual *vwk, VDIpars *pars)
             return;
         }
         
-        extra_size += sizeof(*wk);
-
         if (mfdb->address || intin[11] || intin[12])
         {
             width = intin[11] ? (intin[11] + 1) : wk->screen.mfdb.width;
@@ -249,74 +645,40 @@ void CDECL v_opnvwk(Virtual *vwk, VDIpars *pars)
             width = wk->screen.mfdb.width;
             height = wk->screen.mfdb.height;
         }
-        width = (width + 15) & 0xfff0;
 
-        lwidth = (width >> 3) * bitplanes;	/* >> 4 in assembly file */
-        size = (long)lwidth * height;
-
-        if (!mfdb->address)
-            extra_size += size;
-
-        /* New vwk, but it should really not always be for this driver! */
-        if ((new_vwk = malloc(extra_size)) == NULL)
-        {
-            PRINTF(("v_opnbm: out of memory (%ld)\n", extra_size));
+        new_vwk = new_bitmap_vwk(wk, width, height, bitplanes, mfdb->address, 0, intin[13], intin[14]);
+        if (!new_vwk)
             return;
-        }
-
-        new_wk = (Workstation *)((long)new_vwk + sizeof(Virtual) + 32);
-        copymem(wk, new_wk, sizeof(Workstation));
-        copymem(wk->driver->default_vwk, new_vwk, sizeof(Virtual));
+        new_wk = new_vwk->real_address;
 
         if (!mfdb->address)
         {
             mfdb->standard = 0;
-            mfdb->address = (short *)((long)new_wk + sizeof(Workstation));
-            memset(mfdb->address, bitplanes > 8 ? -1 : 0, size);
+            mfdb->address = new_wk->screen.mfdb.address;
         }
-
-        new_wk->screen.mfdb.address = mfdb->address;
-        mfdb->width = new_wk->screen.mfdb.width = width;
-        mfdb->height = new_wk->screen.mfdb.height = height;
-        mfdb->wdwidth = new_wk->screen.mfdb.wdwidth = (width >> 4);	/* Right? */
-        mfdb->bitplanes = new_wk->screen.mfdb.bitplanes = bitplanes;
-        mfdb->reserved[0] = new_wk->screen.mfdb.reserved[0] = 0;
-        mfdb->reserved[1] = new_wk->screen.mfdb.reserved[1] = 0;
-        mfdb->reserved[2] = new_wk->screen.mfdb.reserved[2] = 0;
-        new_wk->screen.mfdb.standard = 0;
+        mfdb->width = new_wk->screen.mfdb.width;
+        mfdb->height = new_wk->screen.mfdb.height;
+        mfdb->wdwidth = new_wk->screen.mfdb.wdwidth;
+        mfdb->bitplanes = bitplanes;
+        mfdb->reserved[0] = 0;
+        mfdb->reserved[1] = 0;
+        mfdb->reserved[2] = 0;
         if (mfdb->standard)	/* Need to convert input MFDB to device dependent format? */
             lib_vdi_pp(lib_vr_trnfm, new_vwk, mfdb, mfdb);
 
-        new_wk->screen.type = 0;
-        new_wk->screen.wrap = lwidth;		/* Right? */
-        new_wk->screen.shadow.buffer = 0;
-        new_wk->screen.shadow.address = 0;
-        new_wk->screen.shadow.wrap = 0;
-
-        new_wk->screen.pixel.width = intin[13];
-        new_wk->screen.pixel.height = intin[14];
-
-        new_wk->screen.coordinates.course = 0;	/* ? */
-        new_wk->screen.coordinates.min_x = 0;
-        new_wk->screen.coordinates.min_y = 0;
-        new_wk->screen.coordinates.max_x = width - 1;
-        new_wk->screen.coordinates.max_y = height - 1;
-
-        /* Probably OK to mark all these as unavailable */
-        new_wk->various.input_type = 0;
-        new_wk->various.inking = 0;
-        new_wk->various.buttons = 0;
-        new_wk->various.cursor_movement = 0;
-        new_wk->various.number_entry = 0;
-        new_wk->various.selection = 0;
-        new_wk->various.typing = 0;
-        new_wk->various.workstation_type = 0;
-        new_wk->mouse.type = 0;				/* Enough? */
-
-        new_vwk->real_address = new_wk;
         vwk = new_vwk;
         wk = new_wk;
     }
+
+    open_vwk_finish(vwk, wk, hnd, handle_entry, pars);
+}
+
+
+/* What every new workstation gets: ordinary or bitmap, from work_in */
+static void open_vwk_finish(Virtual *vwk, Workstation *wk, short hnd, Virtual **handle_entry, VDIpars *pars)
+{
+    unsigned short c;
+    short dummy;
 
     vwk->fill.user.pattern.in_use = (short *)((long)vwk + sizeof(Virtual));
     vwk->fill.user.pattern.extra = 0;
@@ -483,6 +845,7 @@ void CDECL v_clsvwk(Virtual *vwk, VDIpars *pars)
     itab_close(vwk);
     ctab_close(vwk);
     x_colours_close(vwk);
+    bitmap_extra_close(vwk);
     free(vwk);	/* This will work for off-screen bitmaps too, fortunately */
 
     /* Reset VDI structure address to default */
