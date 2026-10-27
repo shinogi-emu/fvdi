@@ -6,7 +6,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -22,6 +22,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) bitmaps_guest.c -lgem -o $(TEST_BUILD)/BITMAPS.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) realext_guest.c -lgem -o $(TEST_BUILD)/REALEXT.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) nvdimisc_guest.c -lgem -o $(TEST_BUILD)/NVDIMISC.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) outline_guest.c -lgem -o $(TEST_BUILD)/OUTLINE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
 # A surviving emulator / successful screenshot is not a passing raster test.
@@ -87,3 +88,11 @@ check-nvdimisc-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI NVDIMISC FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI NVDIMISC GUEST PASS' "$(GUEST_LOG)"
+
+# OUTLINE.PRG: v_getoutline, v_get_outline and vst_width; the outline of an
+# 'O' filled with v_bez_fill into a bitmap.  Needs a 16-bit or deeper
+# screen for the fill, and an outline font.
+check-outline-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI OUTLINE FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI OUTLINE GUEST PASS' "$(GUEST_LOG)"
