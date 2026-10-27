@@ -41,8 +41,9 @@ Example:
         tests/hatari/run.sh tt8-colors tt MODE8.PRG bitplane.sys COLORS.PRG COLORS
 
 RASTER.PRG runs from AUTO ("auto" after the tag): it checks for a
-planar screen itself and then needs check-planar-log.  BITMAPS.PRG reads
-16-bit pixels and says SKIPPED on a palette screen.
+planar screen itself and then needs check-planar-log.  PENS.PRG says
+SKIPPED above 8 planes, where there is no colour table to check pens
+against.
 
 Timings
 -------
