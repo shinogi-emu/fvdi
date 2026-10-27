@@ -157,9 +157,9 @@ void filled_poly_m(Virtual *vwk, short p[][2], long n, Fgbg colour,
         return;
 
     moves--;
-    if (index[moves] == -4)
+    if (moves >= 0 && index[moves] == -4)
         moves--;
-    if (index[moves] == -2)
+    if (moves >= 0 && index[moves] == -2)
         moves--;
 
     miny = maxy = p[0][1];
@@ -191,7 +191,7 @@ void filled_poly_m(Virtual *vwk, short p[][2], long n, Fgbg colour,
     for (y = miny; y <= maxy; y++)
     {
         move_n = moves;
-        movepnt = (index[move_n] + 4) / 2;
+        movepnt = move_n >= 0 ? (index[move_n] + 4) / 2 : -1;  /* never below the list */
         ints = 0;
 
         x2 = p[0][0];
