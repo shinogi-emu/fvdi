@@ -26,6 +26,14 @@
 #define fvdi_magic	1969
 #define ACTIVE		1		/* fVDI installed */
 #define BOOTED		2		/* fVDI can't be removed */
+/*
+ * The NVDI cookie's scan_fonts (+$AC) and get_font_dir (+$B0) vectors are
+ * real.  Without this bit they are zero, and a program that finds the NVDI
+ * cookie on fVDI must not call through them; an older fVDI left garbage
+ * there, so a program that knows it is talking to fVDI should test this
+ * bit rather than the vectors.
+ */
+#define NVDI_FONTSCAN	0x0100
 
 #define MAX_NVDI_SEARCH		100	/* Words of forward search from the initial NVDI dispatcher */
 #define MAX_NVDI_DISTANCE	10000	/* Allowed distance between the two dispatchers */
@@ -80,13 +88,59 @@ struct FSMC_cookie {
  * fVDI's internals.  A browser died exactly that way, and since the value
  * depends on the heap layout the damage was different on every boot.
  *
- * The reserved area moves those reads inside our own zeroed memory.  It is
- * defensive padding against a private ABI fVDI does not implement and does
- * not promise: a NULL vector is precisely what such callers must already
- * check for, so they decline instead of crashing.  Do not remove or shrink
- * it because nothing in fVDI reads it, and do not leave it uninitialized.
+ * The reserved area moves those reads inside our own zeroed memory.  Of
+ * that private ABI fVDI implements exactly two entries, scan_fonts and
+ * get_font_dir, and only when FreeType is there to load fonts (the fVDI
+ * cookie's NVDI_FONTSCAN bit says so); every other slot stays NULL, which
+ * is precisely what such callers must already check for, so they decline
+ * instead of crashing.  Do not remove or shrink the area, and do not leave
+ * it uninitialized.
  */
 #define NVDI_RESERVED	176	/* Covers at least offsets $00..$B3 of the published cookie */
+
+/* NVDI 5's font vectors, as offsets from the start of the cookie */
+#define NVDI_SCAN_FONTS		0xAC
+#define NVDI_GET_FONT_DIR	0xB0
+
+#ifdef __GNUC__
+/*
+ * NVDI calls these with its arguments in registers, not on the stack:
+ *
+ *   scan_fonts    d0.w = folder count, d1 = flags, a0 = char *folders[]
+ *   get_font_dir  d0.w = folder index from 1, a0 = buffer;
+ *                 d0 = 0 when there is no such folder
+ *
+ * and in supervisor mode.  Every register but d0 is given back as found,
+ * which covers whatever a caller assumes NVDI preserves.
+ */
+void nvdi_scan_fonts_entry(void);
+void nvdi_get_font_dir_entry(void);
+
+__asm__(
+    "\t.text\n"
+    "\t.even\n"
+    "_nvdi_scan_fonts_entry:\n"
+    "\tmovem.l %d1-%d7/%a0-%a6,-(%sp)\n"
+    "\text.l   %d0\n"
+    "\tmove.l  %a0,-(%sp)\n"
+    "\tmove.l  %d1,-(%sp)\n"
+    "\tmove.l  %d0,-(%sp)\n"
+    "\tjsr     _nvdi_scan_fonts\n"
+    "\tlea     12(%sp),%sp\n"
+    "\tmovem.l (%sp)+,%d1-%d7/%a0-%a6\n"
+    "\trts\n"
+    "\t.even\n"
+    "_nvdi_get_font_dir_entry:\n"
+    "\tmovem.l %d1-%d7/%a0-%a6,-(%sp)\n"
+    "\text.l   %d0\n"
+    "\tmove.l  %a0,-(%sp)\n"
+    "\tmove.l  %d0,-(%sp)\n"
+    "\tjsr     _nvdi_get_font_dir\n"
+    "\taddq.l  #8,%sp\n"
+    "\tmovem.l (%sp)+,%d1-%d7/%a0-%a6\n"
+    "\trts\n"
+);
+#endif
 
 struct NVDI_cookie {
     short version;  /* 0x0502 for version 5.02   */
@@ -210,6 +264,17 @@ long startup(void)
         {
             readable->nvdi_cookie.reserved[i] = 0;
         }
+#ifdef __GNUC__
+        /* The two font vectors are real when FreeType is there to load fonts */
+        if (nvdi_can_scan_fonts())
+        {
+            char *base = (char *) &readable->nvdi_cookie;
+
+            *(void **) (base + NVDI_SCAN_FONTS) = (void *) nvdi_scan_fonts_entry;
+            *(void **) (base + NVDI_GET_FONT_DIR) = (void *) nvdi_get_font_dir_entry;
+            readable->cookie.flags |= NVDI_FONTSCAN;
+        }
+#endif
     }
     if (calamus_cookie)
     {

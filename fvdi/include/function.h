@@ -119,6 +119,11 @@ int CDECL set_colour_table(Virtual *vwk, long subfunction, short *intin);
 int CDECL colour_table(Virtual *vwk, long subfunction, short *intin, short *intout);
 int CDECL inverse_table(Virtual *vwk, long subfunction, short *intin, short *intout);
 
+/* NVDI 5's font folder vectors, published through the NVDI cookie */
+long CDECL nvdi_scan_fonts(long count, long flags, char **dirs);
+long CDECL nvdi_get_font_dir(long index, char *buf);
+int nvdi_can_scan_fonts(void);
+
 extern char const ft2_version[];
 extern int (*external_init) (void);
 extern void (*external_term) (void);
