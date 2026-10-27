@@ -664,11 +664,13 @@ long CDECL c_fill_area(Virtual *vwk, long x, long y, long w, long h,
     unsigned long pos;
     short *table;
 
-    if (w <= 0 || h <= 0)
-        return 1;
-
     (void) interior_style;
     table = 0;
+    /*
+     * A table operation first: its w and h are not sizes.  The caller
+     * works w out from the low word of the table's address, so testing
+     * it here threw away about half of all span fills.
+     */
     if ((long) vwk & 1) {
         if ((y & 0xffff) != 0)
             return -1;      /* Don't know about this kind of table operation */
@@ -678,6 +680,9 @@ long CDECL c_fill_area(Virtual *vwk, long x, long y, long w, long h,
         vwk = (Virtual *)((long)vwk - 1);
         return -1;          /* Don't know about anything yet */
     }
+
+    if (w <= 0 || h <= 0)
+        return 1;
 
     c_get_colours(vwk, colour, &foreground, &background);
 
