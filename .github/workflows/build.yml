@@ -17,11 +17,6 @@ jobs:
         cross_tool: [ "m68k-atari-mint" ]
     steps:
       - uses: actions/checkout@v5
-      - name: Install SSH keys
-        if: ${{ github.event_name == 'push' }}
-        env:
-          SSH_ID: ${{ secrets.SSH_ID_JOSKA }}
-        run: ./.scripts/install_ssh_id.sh
       - name: Setup environment
         env:
           PROJECT_VERSION: "0.96a"
@@ -38,9 +33,3 @@ jobs:
           ./.scripts/install-pacf.sh
       - name: build
         run: ./.scripts/build.sh
-      - name: deploy
-        if: ${{ github.event_name == 'push' }}
-        env:
-          COMMITER_NAME: ${{ github.event.commits[0].author.name }}
-          COMMITER_EMAIL: ${{ github.event.commits[0].author.email }}
-        run: ./.scripts/deploy.sh
