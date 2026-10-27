@@ -1420,6 +1420,16 @@ static FT_Error ft2_load_glyph(Virtual *vwk, Fontheader *font, unsigned short ch
         return 1;
     }
 
+    /*
+     * Loading a glyph - hinting it - costs several times what rendering it
+     * does once it is loaded, so keep the image text will draw it with as
+     * well.  A glyph is measured (vqt_extent, or text sizing its buffer)
+     * just before it is drawn, and each used to be loaded twice: on a TT
+     * a page of text in a new font or size took twice as long to appear.
+     */
+    if (want & CACHED_METRICS)
+        want |= antialiasing ? CACHED_PIXMAP : CACHED_BITMAP;
+
     /* Load the glyph */
     if (!cached->index)
     {
