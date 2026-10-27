@@ -317,6 +317,29 @@ static int fg_bg_index(Virtual *vwk, int subfunction, short **fg, short **bg, in
 }
 
 
+static int truecolour(const Device *dev);
+static long nearest_index(Virtual *vwk, const COLOR_RGB *rgb);
+
+/*
+ * On a screen with a colour table there is no pen to spare for an RGB
+ * fg/bg colour: changing one would change everything already drawn in it.
+ * There the colour becomes the nearest pen the screen has, which is what
+ * gets drawn and what the queries then report.  NVDI's documentation does
+ * not say what it does here; this is fVDI's choice.  -1 on a true colour
+ * screen, which keeps the colour as it is in a negative pen.
+ */
+static long nearest_pen(Virtual *vwk, const COLOR_ENTRY *values)
+{
+    Workstation *wk = vwk->real_address;
+    const Device *dev = wk->driver ? wk->driver->device : 0;
+
+    if (!dev || truecolour(dev) || !wk->screen.palette.colours || wk->screen.palette.size <= 0)
+        return -1;
+
+    return idx2vdi(wk, (int)nearest_index(vwk, &values->rgb));
+}
+
+
 int CDECL lib_vs_fg_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values)
 {
     short *fg, *bg, index;
@@ -329,6 +352,12 @@ int CDECL lib_vs_fg_color(Virtual *vwk, long subfunction, long colour_space, COL
 
     if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg, 1))
         return -1;
+    index = (short)nearest_pen(vwk, values);
+    if (index >= 0)
+    {
+        *fg = index;
+        return 1;
+    }
     index = *fg = -subfunction * 2 - 2;      /* Index -2/-4... */
 
     palette = vwk->palette;
@@ -367,6 +396,12 @@ int CDECL lib_vs_bg_color(Virtual *vwk, long subfunction, long colour_space, COL
 
     if (!fg_bg_index(vwk, (int)subfunction, &fg, &bg, 1))
         return -1;
+    index = (short)nearest_pen(vwk, values);
+    if (index >= 0)
+    {
+        *bg = index;
+        return 1;
+    }
     index = *bg = -subfunction * 2 - 3;      /* Index -3/-5... */
 
     palette = vwk->palette;
@@ -402,6 +437,13 @@ long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
         return -1;
     index = *fg;
 
+    if (index >= 0)
+    {
+        /* A VDI pen; the palette is in hardware order, as for vq_color */
+        index = vdi2idx(vwk->real_address, index);
+        if (index < 0)
+            return -1;
+    }
     palette = vwk->palette;
     if (!palette || (((long)palette & 1) && (index >= 0)))   /* No or only part local? */
         palette = vwk->real_address->screen.palette.colours;
@@ -425,6 +467,13 @@ long CDECL lib_vq_bg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour)
         return -1;
     index = *bg;
 
+    if (index >= 0)
+    {
+        /* A VDI pen; the palette is in hardware order, as for vq_color */
+        index = vdi2idx(vwk->real_address, index);
+        if (index < 0)
+            return -1;
+    }
     palette = vwk->palette;
     if (!palette || (((long)palette & 1) && (index >= 0)))   /* No or only part local? */
         palette = vwk->real_address->screen.palette.colours;
