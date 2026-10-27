@@ -765,11 +765,15 @@ static void bit_blt(struct blit_frame *info)
     /* Does destination just span a single word? */
     if (!d_span)
     {
-        /* Merge both end masks into Endmask1. */
+        /*
+         * Merge both end masks.  Both, not just the left one: a blit that
+         * runs right to left (source below destination in memory, as most
+         * expands from a buffer to the screen are) takes the right one as
+         * its first mask, and with the left edge missing from it wrote
+         * over the pixels before the destination in its word.
+         */
         lendmask &= rendmask;           /* Single word end mask */
-#if 0
         rendmask = lendmask;
-#endif
         skew_idx |= 0x0004;             /* Single word dst */
         /* The other end masks will be ignored by the BLiTTER */
     }
