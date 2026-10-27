@@ -13,7 +13,6 @@
 #include "utility.h"
 #include "globals.h"
 
-#define NEG_PAL_N	9	/* Number of negative palette entries */
 
 
 Virtual **handle_link = 0;
@@ -322,6 +321,7 @@ void CDECL v_opnvwk(Virtual *vwk, VDIpars *pars)
     vwk->fill.user.pattern.in_use = (short *)((long)vwk + sizeof(Virtual));
     vwk->fill.user.pattern.extra = 0;
     vwk->fill.user.multiplane = 0;
+    x_colours_close(vwk);   /* nothing left from a vwk that had this address */
 
     /* Return information about workstation */
     lib_vq_extnd(vwk, 0, 0, pars->intout, pars->ptsout);
@@ -482,6 +482,7 @@ void CDECL v_clsvwk(Virtual *vwk, VDIpars *pars)
         vwk->text.current_font->extra.ref_count--; /* Allow the font to be freed if appropriate */
     itab_close(vwk);
     ctab_close(vwk);
+    x_colours_close(vwk);
     free(vwk);	/* This will work for off-screen bitmaps too, fortunately */
 
     /* Reset VDI structure address to default */

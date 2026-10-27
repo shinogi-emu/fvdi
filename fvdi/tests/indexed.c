@@ -456,22 +456,22 @@ static void colour_tables(void)
      * its allocation base, preserve negative entries, and be atomic on OOM.
      */
     {
-        Colour *negative = malloc(9 * sizeof(Colour));
+        Colour *negative = malloc(NEG_PAL_N * sizeof(Colour));
         RGB rgb = { 1000, 500, 0 };
-        memset(negative, 0x57, 9 * sizeof(Colour));
-        v.palette = (Colour *)((unsigned long)(negative + 9) | 1);
+        memset(negative, 0x57, NEG_PAL_N * sizeof(Colour));
+        v.palette = (Colour *)((unsigned long)(negative + NEG_PAL_N) | 1);
         device.clut = 0; palette_writes = 0;
         fail_malloc = 1;
         lib_vs_color(&v, 0, &rgb);
-        assert(!fail_malloc && !palette_writes && v.palette == (Colour *)((unsigned long)(negative + 9) | 1));
+        assert(!fail_malloc && !palette_writes && v.palette == (Colour *)((unsigned long)(negative + NEG_PAL_N) | 1));
         lib_vs_color(&v, 0, &rgb);
         assert(palette_writes == 1 && !((unsigned long)v.palette & 1));
-        for (i = 0; i < (int)(9 * sizeof(Colour)); i++)
-            assert(((unsigned char *)(v.palette - 9))[i] == 0x57);
+        for (i = 0; i < (int)(NEG_PAL_N * sizeof(Colour)); i++)
+            assert(((unsigned char *)(v.palette - NEG_PAL_N))[i] == 0x57);
         assert(memcmp(v.palette, colors, wk.screen.palette.size * sizeof(Colour)) == 0);
         lib_vs_color(&v, -1, &rgb);
         assert(palette_writes == 1);
-        free(v.palette - 9); v.palette = NULL;
+        free(v.palette - NEG_PAL_N); v.palette = NULL;
         fail_malloc = 1;
         lib_vs_color(&v, 0, &rgb);
         assert(!v.palette && palette_writes == 1 && !fail_malloc);

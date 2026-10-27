@@ -14,6 +14,7 @@ transparent	equ	1		; Fall through?
 	xref	redirect
 	xref	_lib_vs_color,_lib_vq_color,_lib_vs_fg_color,_lib_vs_bg_color
 	xref	_lib_vq_fg_color,_lib_vq_bg_color
+	xref	_lib_vs_x_color,_lib_vq_x_color
 
 	xdef	vs_fg_color,vs_bg_color,vq_fg_color,vq_bg_color
 	xdef	vs_x_color,vq_x_color
@@ -95,26 +96,53 @@ vs_bg_color:
 	
 
 * vs_x_color - Standard Trap function
-* Todo: ?
+* vs_hilite_color, vs_min_color, vs_max_color, vs_weight_color (sub 0-3)
 * In:   a1      Parameter block
 *       a0      VDI struct
 vs_x_color:
-	moveq	#1,d0
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
+	move.l	intin(a1),a2
+	pea	4(a2)			; COLOR_ENTRY
+	move.l	(a2),-(a7)		; colour space
+	move.l	control(a1),a2
+	move.w	subfunction(a2),d0
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_vs_x_color
+	add.w	#16,a7
+
+	movem.l	(a7)+,d2/a1
 	move.l	intout(a1),a2
 	move.w	d0,(a2)
+	used_d1
 	done_return
 
 
 * vq_x_color - Standard Trap function
-* Todo: ?
+* vq_hilite_color, vq_min_color, vq_max_color, vq_weight_color (sub 0-3)
 * In:   a1      Parameter block
 *       a0      VDI struct
 vq_x_color:
+	uses_d1
+	movem.l	d2/a1,-(a7)
+
 	move.l	intout(a1),a2
-	move.l	#1,(a2)+		; RGB_SPACE
-	move.w	#0,(a2)+		; Reserved
-	move.l	#0,(a2)+		; RGB
-	move.w	#0,(a2)+
+	pea	4(a2)			; COLOR_ENTRY
+	move.l	control(a1),a2
+	move.w	subfunction(a2),d0
+	ext.l	d0
+	move.l	d0,-(a7)
+	move.l	a0,-(a7)
+	jsr	_lib_vq_x_color
+	add.w	#12,a7
+
+	movem.l	(a7)+,d2/a1
+	move.l	intout(a1),a2
+	move.l	d0,(a2)			; colour space
+	used_d1
 	done_return
 
 
