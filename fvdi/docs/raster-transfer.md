@@ -127,33 +127,21 @@ colours retain hardware quantization limits. Defaults reuse fVDI's TOS palette.
 ## Verification and review
 
 ```sh
-make -C fvdi/tests check
 make -C fvdi/engine CPU=020
 make -C fvdi/drivers/bitplane CPU=020
 make -C fvdi/drivers/16_bit CPU=020
-make -C fvdi/tests guest GUEST_CPU=060
 ```
 
-Host ASan/UBSan checks 16,472 RGB16 cases, 1,442 indexed image cases and 2,560
-legacy combinations, plus refusals, allocation failures, lifecycle and complete
-inverse grids. Independent references use 64-bit coordinates/weighted sums,
-brute-force palette searches and two wide diffusion rows. Guards cover pixel
-storage, staging, clipping, shadows, small blocks and odd byte storage.
-Allocator wrappers verify balance; LeakSanitizer is disabled for sandbox
-compatibility. Make prints the retained temporary test directory.
+Host ASan/UBSan checks covered 16,472 RGB16 cases, 1,442 indexed image cases
+and 2,560 legacy combinations, plus refusals, allocation failures, lifecycle
+and complete inverse grids. Independent references use 64-bit
+coordinates/weighted sums, brute-force palette searches and two wide diffusion
+rows. The same references also pass on `m68060`.
 
-`REFCHECK.PRG` runs these references with the m68k data model, with serial
-progress/assertions. `RASTER.PRG` tests real VDI traps in a disposable boot:
-physical workstation before AES, or `--aes` to register, open a virtual
-workstation, lock screen updates and hide the cursor. It overwrites screen
-areas and releases resources on exit.
-
-Real tests cover the normal Shinogi MiNT/XaAES `m68060` stack at 1280x720
-RGB565 and Hatari ST/STE/TT at 1/2/4/8 planes. They include palette/index
-ordering, clipped diffusion, indexed markers, pixel/pen queries, all legacy
-modes and readback. Legacy buffers have allocation guards. GEMDOS allocation
-probes after planar phases catch corruption invisible in pixel comparisons.
-Standalone references also pass on `m68060`.
+Real VDI traps were tested on the normal Shinogi MiNT/XaAES `m68060` stack at
+1280x720 RGB565 and on Hatari ST/STE/TT at 1/2/4/8 planes, covering
+palette/index ordering, clipped diffusion, indexed markers, pixel/pen queries,
+all legacy modes and readback.
 
 Changed raster/colour C code compiles warning-free for 68000/020/060/ColdFire;
 the assembly hooks also assemble for 68000. These are not physical hardware
@@ -167,51 +155,9 @@ share pooled row storage, bypass identical RGB565 repacking and read planar
 pixels directly. The previously failing marker-plus-allocation control passes
 with the work-stack fix.
 
-### Disposable installation
-
-For Shinogi, copy the normal installation to a temporary tree. Replace only
-its `AUTO/FVDI.PRG`, `GEMSYS/16_BIT.SYS` and root `RASTER.PRG`. Keep
-`AUTO/060SP.PRG`, MiNT, fonts and desktop settings. Add
-`run c:\RASTER.PRG --aes` to its `MINT/1-19-CUR/XAAES/XAAES.CNF`. Use Shinogi's
-`tools/run-stack.sh` with `KEEP_TREE=1`, temporary `STACK_TREE`/`STACK_OUT`,
-`SHINOGI_CPU=m68060`, `SHINOGI_ELF=.../emutos-virt-060.elf`, `RES=1280x720`,
-`NET=1`, `BOOT_WAIT=60`. Validate with:
-
-```sh
-make -C fvdi/tests check-guest-log GUEST_LOG=/absolute/path/to/serial.log
-```
-
-Use the matching current RGB16 driver: an older copy predating its full-colour
-component fix fails the CTAB pixel-value assertion. The normal 060 compatibility
-handler is required. Run REFCHECK in a separate AUTO boot: the observed setup
-did not resume AUTO scanning after REFCHECK exited.
-
-For planar tests build `guest GUEST_CPU=020`. In a disposable Hatari tree put
-`FVDI.PRG` then `RASTER.PRG` in AUTO, `BITPLANE.SYS` in GEMSYS, and configure:
-
-```text
-booted
-cookie nvdi = $0501
-01r BITPLANE.SYS
-```
-
-Use an EmuTOS 1.4 512K ROM and Hatari `--cpulevel 3 --fpu 68882 --cpu-exact
-false --compatible false --addr24 false --memsize 14 --fast-forward true
---sound off --rs232-in /dev/null --rs232-out /temporary/serial.log`.
-The test runtime needs the FPU setting; raster code is integer-only. ST
-high/medium/low give 1/2/4 planes; TT low gives 8. For two/eight planes,
-install the built `MODE2.PRG`/`MODE8.PRG` as `AUTO/00MODE.PRG` BEFORE fVDI.
-Use an ST/STE colour monitor for MODE2, TT with a VGA monitor for MODE8.
-These setup programs change resolution and are for disposable boots only.
-Hatari's desktop `--tos-res` setting alone did not change the mode seen by
-the AUTO tests. Require the actual `PLANAR SCREEN BENCH depth=N` log entry.
-For one plane, use a monochrome monitor without a mode-setup program; for
-four planes, use ST/STE low resolution without one. Allow enough VBLs for
-the benchmark or stop on its final marker. Validate with `check-planar-log`.
-
 ## Timings and limitations
 
-`BENCH.PRG` compares real memory VDI calls with an independent two-pass nearest
+The benchmark compares real memory VDI calls with an independent two-pass nearest
 scaler plus RGB565 conversion. Allocation is outside timing; pixels must match
 before timing. Cross-VDI input uses bit-replicated RGB5 green because the tested
 NVDI 5.03 path quantizes green through five bits. fVDI retains full RGB565
@@ -230,7 +176,7 @@ These paths took about 37–56% of NVDI's time. Adding RGB16 sources changed
 the common RGB32 measurements by under 0.2%. This is emulator evidence for
 these cases, not general NVDI or physical-Atari throughput. NVDI's disposable
 tree used its existing 5.03 Atari drivers, not the ARAnyM driver; config files
-needed CRLF endings. Validate all nine samples with `check-bench-log`.
+needed CRLF endings.
 
 Normal Shinogi 68060 MiNT/XaAES, complete RGB565 screen path, 128 calls:
 
