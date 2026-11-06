@@ -64,11 +64,14 @@ static uint32_t combine(int op, uint32_t s, uint32_t d, int expand, int n)
             ((op & 2) ? (s & ~d) : 0) | ((op & 1) ? (s & d) : 0)) & mask;
 }
 
+static MFDB native_bitmap;
+
 void legacy_test_blit(void *func, Virtual *v, long mode, void *points, void *source, void *dest, void *pens)
 {
     const short *xy = points;
     const MFDB *src = source;
     MFDB *dst = dest ? dest : &v->real_address->screen.mfdb;
+    if (!dst->address) dst = &native_bitmap;
     int x, packed = v->real_address->driver->device->format == 2;
     int expand = func == (void *)lib_vrt_cpyfm;
     assert(expand || func == (void *)lib_vro_cpyfm);
@@ -153,7 +156,7 @@ void legacy_tests(void)
     for (expand = 0; expand < 2; expand++)
     for (mode = expand ? 1 : 0; mode <= (expand ? 4 : 15); mode++)
     for (standard = 0; standard < 2; standard++)
-    for (screen = 0; screen < 2; screen++)
+    for (screen = 0; screen < 3; screen++)
     for (shrink = 0; shrink < 2; shrink++)
     for (blocks = 0; blocks < 2; blocks++)
     {
@@ -171,6 +174,7 @@ void legacy_tests(void)
         dst.address = (short *)d; dst.width = 64; dst.height = 48; dst.wdwidth = 4; dst.bitplanes = n;
         wk.screen.mfdb = dst; wk.screen.wrap = 8 * n;
         if (!screen) wk.screen.mfdb.address = NULL;
+        if (screen == 2) { native_bitmap = dst; wk.screen.mfdb.address = NULL; }
         dp = screen ? NULL : &dst;
         device.format = packed ? 2 : 0;
         v.clip.on = 1; v.clip.rectangle.x1 = 5; v.clip.rectangle.y1 = 4;

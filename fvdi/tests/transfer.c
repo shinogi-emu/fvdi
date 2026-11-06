@@ -45,6 +45,8 @@ static union {
 } pool;
 static long pool_capacity = 10240;
 static int pool_busy, pool_unavailable, blits;
+static int addressless_screen;
+static unsigned char *native_display;
 static Workstation wk;
 static Virtual vwk;
 static Driver driver;
@@ -128,7 +130,7 @@ void lib_vdi_spppp(void *func, Virtual *v, long mode, void *points,
         {
             long target = (xy[5] + y) * wk.screen.wrap + xy[4] * 2 + x;
             unsigned char value = ((unsigned char *)s->address)[y * s->wdwidth * 32 + x];
-            ((unsigned char *)wk.screen.mfdb.address)[target] = value;
+            (wk.screen.mfdb.address ? (unsigned char *)wk.screen.mfdb.address : native_display)[target] = value;
             if (wk.screen.shadow.address)
                 ((unsigned char *)wk.screen.shadow.address)[target] = value;
         }
@@ -145,7 +147,8 @@ static void screen_setup(int w, int h, unsigned char *pixels, int green_bits, in
     vwk.real_address = &wk;
     wk.driver = &driver;
     driver.device = &device;
-    wk.screen.mfdb.address = (short *)pixels;
+    native_display = pixels;
+    wk.screen.mfdb.address = addressless_screen ? NULL : (short *)pixels;
     wk.screen.mfdb.width = w;
     wk.screen.mfdb.height = h;
     wk.screen.mfdb.bitplanes = 16;
@@ -444,6 +447,12 @@ int main(void)
         check_case(37, 53, 83, 29, 1, 2, 1, indexed);
         check_case(37, 53, 83, 29, 1, 0, 2, indexed);
     }
+    addressless_screen = 1;
+    for (indexed = 0; indexed < 6; indexed++)
+        for (variant = 0; variant < 3; variant++)
+            for (screen = 0; screen < 3; screen++)
+                check_case(23, 17, 53, 31, 1, variant, screen, indexed);
+    addressless_screen = 0;
     extreme_coordinates();
     rejected();
     reference_progress("FVDI REFERENCE indexed checks\r\n");
