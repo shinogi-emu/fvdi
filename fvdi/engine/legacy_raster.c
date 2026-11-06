@@ -116,11 +116,13 @@ static void scale(Virtual *vwk, const void *arguments, int expand)
     screen = !dst || !dst->address;
     if (screen)
     {
-        if (!wk->screen.mfdb.address || wk->screen.mfdb.width <= 0 || wk->screen.mfdb.height <= 0 ||
+        if (wk->screen.mfdb.width <= 0 || wk->screen.mfdb.height <= 0 ||
             wk->screen.wrap < ((long)wk->screen.mfdb.width + 15) / 16 * 2 * planes)
             return;
         dest_bytes = (unsigned long)wk->screen.wrap * wk->screen.mfdb.height;
-        if (overlap(src->address, source_bytes, wk->screen.mfdb.address, dest_bytes) ||
+        /* Native drivers may expose a screen only through their blit callback. */
+        if ((wk->screen.mfdb.address &&
+             overlap(src->address, source_bytes, wk->screen.mfdb.address, dest_bytes)) ||
             (wk->screen.shadow.address && overlap(src->address, source_bytes, wk->screen.shadow.address, dest_bytes)))
             return;
         xmin = 0; ymin = 0;
