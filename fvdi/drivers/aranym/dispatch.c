@@ -40,17 +40,22 @@ int nf_initialize(void)
 }
 
 
+/* NatFeat uses NULL for the display, but a bitmap workstation's implicit
+ * screen is guest memory.  Compare explicit addresses with the driver's
+ * display workstation, not with the current (possibly bitmap) one. */
 static MFDB *simplify(Virtual *vwk, MFDB *mfdb)
 {
+    Workstation *wk;
+    MFDB *display;
+
     vwk = (Virtual *) ((long) vwk & ~1);
-    if (!mfdb)
+    wk = vwk->real_address;
+    display = &wk->driver->default_vwk->real_address->screen.mfdb;
+    if (!mfdb || !mfdb->address)
+        mfdb = &wk->screen.mfdb;
+    if (mfdb->address == display->address)
         return 0;
-    else if (!mfdb->address)
-        return 0;
-    else if (mfdb->address == vwk->real_address->screen.mfdb.address)
-        return 0;
-    else
-        return mfdb;
+    return mfdb;
 }
 
 
@@ -119,7 +124,7 @@ long CDECL c_expand_area(Virtual *vwk, MFDB *src, long src_x, long src_y,
     MFDB *simple_dst;
 
     simple_dst = simplify(vwk, dst);
-    if (!simple_dst || (dst->bitplanes > 8))
+    if (!simple_dst || (simple_dst->bitplanes > 8))
     {
         get_colours_r((Virtual *) ((long) vwk & ~1), colour, &foreground, &background);
     } else

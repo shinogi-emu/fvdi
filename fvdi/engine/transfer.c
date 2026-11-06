@@ -460,12 +460,14 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
     } else
     {
         if (!wk->driver || !screen_packing(wk->driver->device, &packing) ||
-            !wk->screen.mfdb.address || wk->screen.mfdb.width <= 0 ||
+            wk->screen.mfdb.width <= 0 ||
             wk->screen.mfdb.height <= 0 ||
             wk->screen.wrap < (long)wk->screen.mfdb.width * 2)
             return 1;
         dst_bytes = (unsigned long)wk->screen.wrap * wk->screen.mfdb.height;
-        if (overlaps(src->addr, src_bytes, wk->screen.mfdb.address, dst_bytes) ||
+        /* Screen output is staged through the driver, so VRAM need not be mapped. */
+        if ((wk->screen.mfdb.address &&
+             overlaps(src->addr, src_bytes, wk->screen.mfdb.address, dst_bytes)) ||
             (wk->screen.shadow.address &&
              overlaps(src->addr, src_bytes, wk->screen.shadow.address, dst_bytes)))
             return 1;
