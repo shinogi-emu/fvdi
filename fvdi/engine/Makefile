@@ -85,6 +85,7 @@ CSRC = \
 	calamus.c \
 	bconout.c \
 	transfer.c \
+	alpha.c \
 	itable.c \
 	ctab.c \
 	legacy_raster.c \

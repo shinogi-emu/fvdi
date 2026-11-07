@@ -1,0 +1,73 @@
+fVDI extensions, November 2026
+=============================
+
+Feature detection for applications such as HighWire
+--------------------------------------------------
+The fVDI cookie is 'fVDI' ($66564449). Its first word is the version;
+the word at +2 contains flags. These extension bits are now defined in
+include/fvdi.h:
+
+    $0100 FVDI_CAP_FONTSCAN        implemented NVDI font-directory vectors
+    $0200 FVDI_CAP_TEXT_WIDTH      independent outline width and fixed advances
+    $0400 FVDI_CAP_RGB32_TRANSFER  converted RGB32 destination subset
+    $0800 FVDI_CAP_ALPHA_TEXT      engine-composited true-colour outline text
+
+These are fVDI flags, not flags in the NVDI cookie. They describe code
+availability, not complete NVDI compatibility or every format/mode pair.
+Width/alpha flags require a FreeType build. The fontscan bit is set only
+when the NVDI cookie and its vectors are published. Do not infer these
+extensions from the configured NVDI version alone.
+
+Fontscan uses the NVDI cookie vectors at +$AC and +$B0, with their existing
+register interface. After saving a downloaded font and rescanning, refresh
+the application's font enumeration. Rescanning adds fonts; it does not
+remove or replace faces an open workstation might still reference.
+
+Font widths and fixed-pitch metrics
+-----------------------------------
+vst_width selects a positive character width in pixels independently of
+height. The selected face has a separate glyph cache keyed by width, size
+and effects. vst_point, vst_arbpt and vst_height
+reset the width. Different workstations can retain different widths.
+
+vst_setsize32 selects positive horizontal width in 16.16 point units,
+without changing height. The returned value reflects transform precision.
+The previous implementation incorrectly changed overall point size.
+Bitmap fonts retain native dimensions. Mirrored/negative widths remain
+unsupported; vst_setsize32 reports 0 and leaves the font unchanged.
+The old single-word vst_setsize entry remains outside this extension.
+
+Fixed-pitch outline fonts report summed advances for vqt_extent. Italic ink
+overhangs do not make '.' and 'W' measure as different cell widths. Rendering
+retains full ink bounds, so this does not clip italic glyphs. HighWire can
+keep its existing monospace check for all four Liberation Mono styles.
+
+Raster output
+--------------
+RGB16, xRGB32 and indexed sources now convert/scale to xRGB32 memory and
+supported 32-bit screens, using copy/replace modes with bounded staging.
+See raster.txt for formats, scaling, clipping and refusal rules. Keep an
+application fallback for modes/formats outside that subset. The feature
+flag does not set the broad NVDI new-raster capability bits in vq_extnd.
+
+Antialiasing
+-------------
+With 'antialias' enabled, FreeType's coverage is composited into native
+16/32-bit rows through ordinary read/write bitmap blits. Native screens
+need no directly mapped guest framebuffer. Memory bitmap workstations,
+clipping and text alignment are handled by the same engine path.
+
+Replace blends text foreground over text background. Transparent blends
+over existing pixels. XOR blends toward inverted RGB components; reverse
+transparent blends text background through inverse coverage. As with the
+previous ARAnyM alpha path, antialiased XOR is a blend, not an involution.
+Palette/unsupported screens use the normal monochrome renderer.
+
+Glyph conversion now frees the original outline when producing a bitmap,
+and failed FreeType rendering does not dereference a nonexistent bitmap.
+
+Settings
+---------
+FVDISET.PRG edits the selected FVDI.SYS, retaining unrelated configuration
+and unique backups. See utility/settings/README.txt for driver controls,
+limits and restart behaviour. It is a GEM application, not a CPX.

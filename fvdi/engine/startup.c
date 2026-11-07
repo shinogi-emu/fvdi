@@ -33,7 +33,7 @@
  * there, so a program that knows it is talking to fVDI should test this
  * bit rather than the vectors.
  */
-#define NVDI_FONTSCAN	0x0100
+#define NVDI_FONTSCAN	FVDI_CAP_FONTSCAN
 
 #define MAX_NVDI_SEARCH		100	/* Words of forward search from the initial NVDI dispatcher */
 #define MAX_NVDI_DISTANCE	10000	/* Allowed distance between the two dispatchers */
@@ -238,7 +238,10 @@ long startup(void)
     }
 
     readable->cookie.version = VERSION;
-    readable->cookie.flags = 0;
+    readable->cookie.flags = FVDI_CAP_RGB32_TRANSFER;
+#ifdef FT2
+    readable->cookie.flags |= FVDI_CAP_TEXT_WIDTH | FVDI_CAP_ALPHA_TEXT;
+#endif
     readable->cookie.remove = remove_fvdi;
     readable->cookie.setup = setup_fvdi;
     readable->cookie.log = &super->fvdi_log;
@@ -534,7 +537,10 @@ static long CDECL remove_fvdi(void)
         }
         ret = free_all();
         shut_down();
-        readable->cookie.flags = 0;
+        readable->cookie.flags = FVDI_CAP_RGB32_TRANSFER;
+#ifdef FT2
+    readable->cookie.flags |= FVDI_CAP_TEXT_WIDTH | FVDI_CAP_ALPHA_TEXT;
+#endif
     }
 
     return ret;

@@ -20,6 +20,12 @@
 #endif
 
 #define FVDI_MAGIC 0x66564449L /* "fVDI" */
+/* Optional extensions in the flags word at +2 of the fVDI cookie. These
+ * describe implemented subsets, not complete NVDI raster capabilities. */
+#define FVDI_CAP_FONTSCAN       0x0100
+#define FVDI_CAP_TEXT_WIDTH     0x0200
+#define FVDI_CAP_RGB32_TRANSFER 0x0400
+#define FVDI_CAP_ALPHA_TEXT     0x0800
 
 #define CHUNKY		1
 #define TRUE_COLOUR	2
@@ -237,6 +243,8 @@ typedef struct Fontextra_ {
     void *scratch;		/* Glyph scratch .. */
     short effects;		/* Effect combination the font was rendered to */
     short underline_offset;	/* Offset or the underline stroke */
+    short x_width;              /* Requested outline character width; 0 = natural */
+    long x_scale;               /* Fractional horizontal scale; 0 = natural */
 } Fontextra;
 
 

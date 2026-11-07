@@ -797,36 +797,30 @@ long CDECL lib_vqt_name_and_id(Virtual *vwk, long format, const short *name_in,
 }
 
 
-/*
- * width = lib_vst_setsize32(point, charw, charh, cellw, cellh)
- *
- * NVDI's VDI 252 with two intin words: the character width in 1/65536 of a
- * point, where plain vst_setsize takes whole points in one word.
- *
- * fVDI sizes fonts in whole points, so the fraction is rounded rather than
- * honoured, and the returned value is the size actually selected converted
- * back -- a caller that asks for 10.5pt and is told 10.0 can act on that,
- * whereas one told 10.5 when it got 10.0 lays text out wrongly and has no
- * way to know.
- */
+/* NVDI horizontal width in 16.16 points, independent of height. */
 long CDECL lib_vst_setsize32(Virtual *vwk, long point, short *charw, short *charh,
                              short *cellw, short *cellh)
 {
-    long points = (point + 0x8000L) >> 16;   /* 16.16 fixed -> whole points */
-
-    if (points < 1)
-        points = 1;
-
-    return ((long) lib_vst_arbpt(vwk, points, charw, charh, cellw, cellh)) << 16;
+    Fontheader *font = vwk->text.current_font;
+    long result = 0;
+    if ((font->flags & FONTF_EXTERNAL) && external_vst_setsize) {
+        Fontheader *scaled = set_stack_call_pvlpl(vdi_stack_top, vdi_stack_size,
+                               external_vst_setsize, vwk, point, 0, 0);
+        if (scaled) {
+            set_current_font(vwk, scaled);
+            font = scaled;
+            /* 16.16 products without a 64-bit dependency on the target. */
+            result = (long)font->size * font->extra.x_scale;
+        }
+    }
+    *charw = vwk->text.character.width = font->widest.character;
+    *charh = vwk->text.character.height = font->distance.top;
+    *cellw = vwk->text.cell.width = font->widest.cell;
+    *cellh = vwk->text.cell.height = font->height;
+    return result;
 }
 
 
-/*
- * Width of a string in a bitmap font, as vqt_extent works it out in
- * text_sq.s, effects included.  (That code compares the character less
- * code.low against code.high rather than against the count of characters,
- * and so does this, so the two never disagree.)
- */
 static long bitmap_text_width(Virtual *vwk, Fontheader *font, const short *text, long length)
 {
     const short *table = font->table.character;
@@ -1025,15 +1019,21 @@ void CDECL lib_v_getoutline(Virtual *vwk, long subfunction, short *intin, short 
 }
 
 
-/*
- * vst_width (231): NVDI sets the character width in pixels, separately
- * from the height.  fVDI's fonts scale as a whole, by point size, so the
- * width cannot change on its own; this reports the character and cell
- * sizes in effect, so a caller learns the width it really has instead of
- * being left with whatever was in its ptsout.
- */
-void CDECL lib_vst_width(Virtual *vwk, short *ptsout)
+/* Independent outline width. Bitmap fonts retain their native dimensions. */
+void CDECL lib_vst_width(Virtual *vwk, const short *ptsin, short *ptsout)
 {
+    Fontheader *font = vwk->text.current_font;
+    if ((font->flags & FONTF_EXTERNAL) && external_vst_width) {
+        Fontheader *scaled = set_stack_call_pvlpl(vdi_stack_top, vdi_stack_size,
+                               external_vst_width, vwk, (long)ptsin[0], 0, 0);
+        if (scaled) {
+            set_current_font(vwk, scaled);
+            vwk->text.character.width = scaled->widest.character;
+            vwk->text.character.height = scaled->distance.top;
+            vwk->text.cell.width = scaled->widest.cell;
+            vwk->text.cell.height = scaled->height;
+        }
+    }
     ptsout[0] = vwk->text.character.width;
     ptsout[1] = vwk->text.character.height;
     ptsout[2] = vwk->text.cell.width;

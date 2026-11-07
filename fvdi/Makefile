@@ -4,6 +4,7 @@ SUBDIRS := \
 	modules/ft2 \
 	engine \
 	drivers \
+	utility/settings \
 	$(empty)
 
 all clean install::

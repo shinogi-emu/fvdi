@@ -705,9 +705,10 @@ vst_width:
 	movem.l	d2/a1,-(a7)
 
 	move.l	ptsout(a1),-(a7)
+	move.l	ptsin(a1),-(a7)
 	move.l	a0,-(a7)
 	jsr	_lib_vst_width
-	addq.l	#8,a7
+	add.w	#12,a7
 
 	movem.l	(a7)+,d2/a1
 	move.l	control(a1),a2
@@ -940,6 +941,14 @@ vst_height:
 	movem.l	(a7)+,d0-d2/a0-a2
 
 	move.l	(a7),a7				; Return to original stack
+	move.l	a3,d1
+	beq	.no_external_vst_height
+	move.l	vwk_text_current_font(a0),a2
+	cmpa.l	a2,a3
+	lbeq	.same_height_font,5
+	subq.w	#1,font_extra_ref_count(a2)
+	addq.w	#1,font_extra_ref_count(a3)
+ label .same_height_font,5
 	lbra	.found,2
 
 .no_external_vst_height:

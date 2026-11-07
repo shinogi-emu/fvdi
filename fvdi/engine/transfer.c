@@ -4,7 +4,7 @@
  * Please see LICENSE.TXT for further information.
  *
  * Independent implementation of the documented NVDI 5 raster interface.
- * RGB32/RGB16/indexed sources to RGB16/indexed destinations, including native
+ * RGB32/RGB16/indexed sources to RGB32/RGB16/indexed destinations, including native
  * screens. Do not advertise complete new-raster support: other pairs are absent.
  */
 
@@ -38,7 +38,7 @@ typedef struct {
 
 typedef struct {
     unsigned short red_mask, green_mask;
-    short red_shift, green_shift, reversed;
+    short red_shift, green_shift, reversed, blue_shift;
 } Packing;
 
 #if defined(__GNUC__)
@@ -195,7 +195,7 @@ static unsigned long interpolate(const unsigned char *row0,
 
 static void render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr,
                    const RECT16 *draw, unsigned char *dst, long stride,
-                   const Packing *packing, const unsigned short *index_palette)
+                   const Packing *packing, const uint32_t *index_palette)
 {
     /* Keep packing constants independent of stores to caller-owned memory.
      * Older GCC otherwise reloads the short fields after every pixel store.
@@ -331,6 +331,81 @@ static void render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr,
     }
 }
 
+/* Packed 32-bit screens may put the RGB bytes in a different order from
+ * PX_PREF32 memory. The unused byte is always zero, never source alpha. */
+PIXEL_INLINE uint32_t pack_32(unsigned long rgb, const Packing *p)
+{
+    return ((uint32_t)((rgb >> 16) & 255) << p->red_shift) |
+           ((uint32_t)((rgb >> 8) & 255) << p->green_shift) |
+           ((uint32_t)(rgb & 255) << p->blue_shift);
+}
+
+PIXEL_INLINE void write_32(unsigned char *out, uint32_t pixel, int reversed)
+{
+    if (reversed) {
+        out[0] = pixel; out[1] = pixel >> 8;
+        out[2] = pixel >> 16; out[3] = pixel >> 24;
+    } else {
+        out[0] = pixel >> 24; out[1] = pixel >> 16;
+        out[2] = pixel >> 8; out[3] = pixel;
+    }
+}
+
+static void render32(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr,
+                     const RECT16 *draw, unsigned char *dst, long stride,
+                     const Packing *packing, const uint32_t *palette)
+{
+    Packing p = *packing;
+    unsigned long sw = (long)sr->x2 - sr->x1 + 1;
+    unsigned long sh = (long)sr->y2 - sr->y1 + 1;
+    unsigned long dw = (long)dr->x2 - dr->x1 + 1;
+    unsigned long dh = (long)dr->y2 - dr->y1 + 1;
+    int filtered = !palette && (sw > dw || sh > dh);
+    Axis initial = axis_start(sw, dw, (long)draw->x1 - dr->x1, filtered);
+    Axis y = axis_start(sh, dh, (long)draw->y1 - dr->y1, filtered);
+    long count = (long)draw->x2 - draw->x1 + 1;
+    long rows = (long)draw->y2 - draw->y1 + 1, previous = -1;
+    long bytes = src->bits / 8;
+    const unsigned char *base = src->addr + ((long)sr->y1 - src->ymin) * src->width +
+                                ((long)sr->x1 - src->xmin) * bytes;
+    while (rows--) {
+        Axis x = initial;
+        long n = count, sy = y.pos;
+        unsigned char *out = dst;
+        const unsigned char *row, *next;
+        unsigned long fy = 0;
+        if (!filtered && sy == previous) {
+            memcpy(dst, dst - stride, count * 4);
+        } else {
+            if (filtered) {
+                sy = MAX(0, MIN(sy, (long)(sh - 1) * 256));
+                fy = sy & 255;
+                row = base + (sy >> 8) * src->width;
+                next = fy ? row + src->width : row;
+            } else {
+                row = base + sy * src->width;
+                next = row;
+            }
+            while (n--) {
+                uint32_t pixel;
+                if (palette) pixel = palette[row[x.pos]];
+                else {
+                    unsigned long rgb = filtered ?
+                        interpolate(row, next, x.pos, sw, fy, src->px_format, bytes) :
+                        read_direct(row + x.pos * bytes, src->px_format);
+                    pixel = pack_32(rgb, &p);
+                }
+                write_32(out, pixel, p.reversed);
+                out += 4;
+                axis_next(&x);
+            }
+        }
+        dst += stride;
+        previous = y.pos;
+        axis_next(&y);
+    }
+}
+
 /* Limit descriptions to the coordinate space RECT16 can address, and check
  * row sizes/products before forming pointers. The caller owns the storage.
  */
@@ -385,12 +460,35 @@ static int screen_packing(const Device *dev, Packing *p)
     return 1;
 }
 
+static int screen_packing32(const Device *dev, Packing *p)
+{
+    int i, r, g, b;
+    if (!dev || dev->format != 2 || dev->bits.red != 8 ||
+        dev->bits.green != 8 || dev->bits.blue != 8)
+        return 0;
+    r = dev->scrmap.bitnumber.red[0];
+    g = dev->scrmap.bitnumber.green[0];
+    b = dev->scrmap.bitnumber.blue[0];
+    if (r < 0 || g < 0 || b < 0 || r > 24 || g > 24 || b > 24 ||
+        (r < g + 8 && g < r + 8) || (r < b + 8 && b < r + 8) ||
+        (g < b + 8 && b < g + 8))
+        return 0;
+    for (i = 0; i < 8; i++)
+        if (dev->scrmap.bitnumber.red[i] != r + i ||
+            dev->scrmap.bitnumber.green[i] != g + i ||
+            dev->scrmap.bitnumber.blue[i] != b + i)
+            return 0;
+    p->red_shift = r; p->green_shift = g; p->blue_shift = b;
+    p->reversed = 0;
+    return 1;
+}
+
 /* Return zero only for pairs owned by the older implementation. A refused
- * A supported-source -> 16-bit refusal must not reach its assumed-32-bit path.
+ * A supported-source -> direct-colour refusal must not reach its assumed-32-bit path.
  */
-static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+static int transfer_direct_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
                                  const RECT16 *sr, const RECT16 *dr, long mode,
-                                 unsigned short *index_palette)
+                                 uint32_t *index_palette, short depth)
 {
     Workstation *wk = vwk->real_address;
     Packing packing;
@@ -400,10 +498,12 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
     char *buffer;
     long capacity, x, y;
     int indexed;
+    long pixel_bytes = depth / 8;
     GCBITMAP source;
 
+    memset(&packing, 0, sizeof(packing));
     if (!src || !source_size(src) ||
-        (dst ? dst->bits != 16 : wk->screen.mfdb.bitplanes != 16))
+        (dst ? dst->bits != depth : wk->screen.mfdb.bitplanes != depth))
         return 0;
     indexed = src->px_format == INDEX8;
     /* Dithering has no effect on a destination with more than 256 colours. */
@@ -440,15 +540,17 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
     {
         unsigned long format = dst->px_format & ~REVERSED;
 
-        dst_bytes = bitmap_bytes(dst, 2);
-        if (!dst_bytes || (format != RGB565 && format != RGB555) ||
+        dst_bytes = bitmap_bytes(dst, pixel_bytes);
+        if (!dst_bytes || (depth == 32 ? format != RGB32 :
+                            (format != RGB565 && format != RGB555)) ||
             overlaps(src->addr, src_bytes, dst->addr, dst_bytes) ||
             (void *)dst->addr == wk->screen.mfdb.address || dst->addr == wk->screen.shadow.address)
             return 1;
+        packing.blue_shift = 0;
         packing.red_mask = format == RGB565 ? 0xf800 : 0x7c00;
         packing.green_mask = format == RGB565 ? 0x07e0 : 0x03e0;
-        packing.red_shift = format == RGB565 ? 8 : 9;
-        packing.green_shift = format == RGB565 ? 5 : 6;
+        packing.red_shift = depth == 32 ? 16 : (format == RGB565 ? 8 : 9);
+        packing.green_shift = depth == 32 ? 8 : (format == RGB565 ? 5 : 6);
         packing.reversed = (dst->px_format & REVERSED) != 0;
         xmin = dst->xmin;
         ymin = dst->ymin;
@@ -459,10 +561,11 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
             return 1;
     } else
     {
-        if (!wk->driver || !screen_packing(wk->driver->device, &packing) ||
+        if (!wk->driver || !(depth == 32 ? screen_packing32(wk->driver->device, &packing) :
+                              screen_packing(wk->driver->device, &packing)) ||
             wk->screen.mfdb.width <= 0 ||
             wk->screen.mfdb.height <= 0 ||
-            wk->screen.wrap < (long)wk->screen.mfdb.width * 2)
+            wk->screen.wrap < (long)wk->screen.mfdb.width * pixel_bytes)
             return 1;
         dst_bytes = (unsigned long)wk->screen.wrap * wk->screen.mfdb.height;
         /* Screen output is staged through the driver, so VRAM need not be mapped. */
@@ -495,7 +598,7 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
             const COLOR_RGB *rgb = &src->ctab->colors[x].rgb;
             unsigned long value = ((unsigned long)(rgb->red >> 8) << 16) |
                                   ((unsigned long)(rgb->green >> 8) << 8) | (rgb->blue >> 8);
-            index_palette[x] = pack_rgb(value, &packing);
+            index_palette[x] = depth == 32 ? pack_32(value, &packing) : pack_rgb(value, &packing);
         }
     draw.x1 = xmin;
     draw.y1 = ymin;
@@ -503,8 +606,8 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
     draw.y2 = ymax;
     if (dst)
     {
-        render(src, sr, dr, &draw,
-               dst->addr + (ymin - dst->ymin) * dst->width + (xmin - dst->xmin) * 2,
+        (depth == 32 ? render32 : render)(src, sr, dr, &draw,
+               dst->addr + (ymin - dst->ymin) * dst->width + (xmin - dst->xmin) * pixel_bytes,
                dst->width, &packing, indexed ? index_palette : 0);
         return 1;
     }
@@ -513,11 +616,11 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
      * split wide rows otherwise. No frame-sized allocation or new cache.
      * The driver blit preserves its screen/shadow-buffer conventions.
      */
-    buffer = allocate_block(32);
+    buffer = allocate_block(16 * pixel_bytes);
     if (!buffer)
         return 1;
     capacity = *(long *)buffer;
-    if (capacity < 32)
+    if (capacity < 16 * pixel_bytes)
     {
         free_block(buffer);
         return 1;
@@ -525,8 +628,8 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
     for (x = xmin; x <= xmax; x = (long)draw.x2 + 1)
     {
         MFDB mfdb;
-        long width = MIN(xmax - x + 1, MIN((capacity / 32) * 16, 32752L));
-        long stride = ((width + 15) & ~15L) * 2;
+        long width = MIN(xmax - x + 1, MIN((capacity / (16 * pixel_bytes)) * 16, 32752L));
+        long stride = ((width + 15) & ~15L) * pixel_bytes;
         long height = MIN(capacity / stride, 32767L);
 
         draw.x1 = x;
@@ -534,8 +637,8 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
         memset(&mfdb, 0, sizeof(mfdb));
         mfdb.address = (short *)buffer;
         mfdb.width = width;
-        mfdb.wdwidth = stride / 32;
-        mfdb.bitplanes = 16;
+        mfdb.wdwidth = stride / (16 * pixel_bytes);
+        mfdb.bitplanes = depth;
         for (y = ymin; y <= ymax; y = (long)draw.y2 + 1)
         {
             short coords[8];
@@ -543,7 +646,7 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
             draw.y1 = y;
             draw.y2 = MIN(ymax, y + height - 1);
             mfdb.height = (long)draw.y2 - y + 1;
-            render(src, sr, dr, &draw, (unsigned char *)buffer, stride, &packing,
+            (depth == 32 ? render32 : render)(src, sr, dr, &draw, (unsigned char *)buffer, stride, &packing,
                    indexed ? index_palette : 0);
             coords[0] = coords[1] = 0;
             coords[2] = width - 1;
@@ -559,23 +662,31 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
     return 1;
 }
 
-/* Keep the 512-byte prepacked indexed palette off the direct-colour stack. */
+/* Keep the prepacked indexed palette off the direct-source stack. */
 #ifdef __GNUC__
 __attribute__((noinline))
 #endif
-static int indexed_to_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
-                            const RECT16 *sr, const RECT16 *dr, long mode)
+static int indexed_to_direct(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+                            const RECT16 *sr, const RECT16 *dr, long mode, short depth)
 {
-    unsigned short palette[256];
-    return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, palette);
+    uint32_t palette[256];
+    return transfer_direct_common(vwk, src, dst, sr, dr, mode, palette, depth);
 }
 
 int CDECL transfer_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
                          const RECT16 *sr, const RECT16 *dr, long mode)
 {
     if (src && src->px_format == INDEX8)
-        return indexed_to_rgb16(vwk, src, dst, sr, dr, mode);
-    return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, 0);
+        return indexed_to_direct(vwk, src, dst, sr, dr, mode, 16);
+    return transfer_direct_common(vwk, src, dst, sr, dr, mode, 0, 16);
+}
+
+int CDECL transfer_rgb32(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+                         const RECT16 *sr, const RECT16 *dr, long mode)
+{
+    if (src && src->px_format == INDEX8)
+        return indexed_to_direct(vwk, src, dst, sr, dr, mode, 32);
+    return transfer_direct_common(vwk, src, dst, sr, dr, mode, 0, 32);
 }
 
 /* The table quantizes RGB8 at the requested 3-5 bit resolution per channel.

@@ -46,6 +46,8 @@ void (*external_xfntinfo)(Virtual *vwk, Fontheader *font, long flags, XFNT_INFO 
 void (*external_fontheader)(Virtual *vwk, Fontheader *font, VQT_FHDR *fhdr) = ft2_fontheader;
 unsigned short (*external_char_index)(Virtual *vwk, Fontheader *font, short *intin) = ft2_char_index;
 long (*external_get_outline)(Virtual *vwk, Fontheader *font, long ch, void *args) = ft2_get_outline;
+Fontheader *(*external_vst_width)(Virtual *, long, short *) = ft2_vst_width;
+Fontheader *(*external_vst_setsize)(Virtual *, long, short *) = ft2_vst_setsize;
 
 #else
 
@@ -63,6 +65,8 @@ void (*external_xfntinfo)(Virtual *vwk, Fontheader *font, long flags, XFNT_INFO 
 void (*external_fontheader)(Virtual *vwk, Fontheader *font, VQT_FHDR *fhdr) = 0;
 unsigned short (*external_char_index)(Virtual *vwk, Fontheader *font, short *intin) = 0;
 long (*external_get_outline)(Virtual *vwk, Fontheader *font, long ch, void *args) = 0;
+Fontheader *(*external_vst_width)(Virtual *, long, short *) = 0;
+Fontheader *(*external_vst_setsize)(Virtual *, long, short *) = 0;
 
 #endif
 

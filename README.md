@@ -12,6 +12,12 @@ These are this fork's builds. Upstream's own builds are not the same
 program: this fork carries a reworked 16bpp driver, FreeType font fixes and
 NVDI-style raster conversion that upstream does not have.
 
+The November 2026 changes add converted 32-bit raster destinations,
+independent outline widths, fixed-pitch italic metrics, antialiased text on
+16/32-bit surfaces, and the portable GEM settings app FVDISET.PRG.
+See [extension details](fvdi/docs/extensions.txt) and the
+[settings guide](fvdi/utility/settings/README.txt) for supported subsets.
+
 ## How to build
 ```
 cd fvdi

@@ -82,6 +82,10 @@ long CDECL ctab_index_to_vdi(Virtual *, long);
 void lib_vro_cpyfm(Virtual *vwk, short mode, short *pxy, MFDB *src, MFDB *dst);
 void lib_vs_clip(Virtual *, short, short *);
 void lib_vr_trnfm(Virtual *, MFDB *, MFDB *);
+int CDECL alpha_text_supported(Virtual *);
+int CDECL alpha_text_blit(Virtual *, const MFDB *, const short *, long);
+int CDECL transfer_rgb32(Virtual *, const GCBITMAP *, GCBITMAP *,
+                         const RECT16 *, const RECT16 *, long);
 int CDECL transfer_rgb16(Virtual *, const GCBITMAP *, GCBITMAP *,
                          const RECT16 *, const RECT16 *, long);
 int CDECL transfer_index8(Virtual *, const GCBITMAP *, GCBITMAP *,
@@ -139,7 +143,9 @@ void CDECL lib_vqt_real_extent(Virtual *vwk, long x, long y, short *text, long l
 const char *fvdi_driver_path(void);
 extern long (*external_get_outline)(Virtual *vwk, Fontheader *font, long ch, void *args);
 void CDECL lib_v_getoutline(Virtual *vwk, long subfunction, short *intin, short *intout, Control *control);
-void CDECL lib_vst_width(Virtual *vwk, short *ptsout);
+extern Fontheader *(*external_vst_setsize)(Virtual *, long, short *);
+extern Fontheader *(*external_vst_width)(Virtual *, long, short *);
+void CDECL lib_vst_width(Virtual *vwk, const short *ptsin, short *ptsout);
 int nvdi_can_scan_fonts(void);
 
 extern char const ft2_version[];
