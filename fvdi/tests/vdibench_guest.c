@@ -12,6 +12,11 @@
  *   VDIBENCH <test> ticks=<n> crc=<hex>
  * and ends with "FVDI VDIBENCH GUEST PASS".  Any argument is taken as a
  * repeat factor for every test (default 1).
+ *
+ * Built with -DVDIBENCH_NOBLIT=1 (VDIBENCB.PRG) it switches the hardware
+ * blitter off with Blitmode(0) before the tests and puts the old mode
+ * back after them, to time a system's software paths on a machine that
+ * has a blitter.  The CRCs must equal those of the plain build.
  */
 
 #include <gem.h>
@@ -21,6 +26,9 @@
 #include <string.h>
 
 static short handle, width, height, planes;
+#ifdef VDIBENCH_NOBLIT
+static short old_blitmode;
+#endif
 static unsigned long crc_table[256];
 static int repeat = 1;
 
@@ -470,6 +478,12 @@ int main(int argc, char **argv)
 
     graf_mouse(M_OFF, 0);
     wind_update(BEG_UPDATE);
+#ifdef VDIBENCH_NOBLIT
+    old_blitmode = Blitmode(-1);
+    (void)Blitmode(0);
+    snprintf(line, sizeof(line), "VDIBENCH blitter off (was %04x, now %04x)", old_blitmode, Blitmode(-1));
+    say(line);
+#endif
 
     lines("hline", 0, 1);
     lines("vline", 1, 1);
@@ -481,7 +495,12 @@ int main(int argc, char **argv)
     text("text-sys-xor", 1, 10, 3);
     text("text-sys-revtransparent", 1, 10, 4);
     expands("expand-modes");
-    fonts = vst_load_fonts(handle, 0);
+    /*
+     * Outline text needs a GDOS to load the fonts.  Without one (the
+     * system's own VDI) vst_load_fonts has no font list to walk, so it is
+     * not called: the test is left out.
+     */
+    fonts = (short)vq_vgdos() != -2 ? vst_load_fonts(handle, 0) : 0;
     for (i = 2; i <= fonts + 1 && !ttf; i++)
     {
         short id = vqt_name(handle, i, fname);
@@ -502,6 +521,9 @@ int main(int argc, char **argv)
     fills("fill-revtransparent", 2, 5, 4);
 
     clear();
+#ifdef VDIBENCH_NOBLIT
+    (void)Blitmode(old_blitmode & 1);
+#endif
     wind_update(END_UPDATE);
     graf_mouse(M_ON, 0);
     v_clsvwk(handle);

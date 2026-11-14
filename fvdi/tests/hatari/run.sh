@@ -25,6 +25,9 @@
 #   FVDI_DRV   a driver to use instead of the template's
 #   TIMEOUT    seconds to wait for a result (default 300)
 #   VBLS       emulated frames before Hatari gives up (default 200000)
+#   CPULEVEL   Hatari --cpulevel, 3 (68030) by default; 0 gives a 68000, which
+#              takes an address error at once on a word or long access at
+#              an odd address
 #   HATARI_ARGS  more Hatari options, after the machine's, which they
 #              override (e.g. "--memsize 4 --ttram 0")
 #
@@ -66,7 +69,7 @@ case $machine in
     *) echo "machine: tt, falcon, ste or stmono" >&2; exit 2;;
 esac
 HOME=$R/home XDG_CONFIG_HOME=$R/home SDL_VIDEODRIVER=dummy SDL_AUDIODRIVER=dummy \
-    stdbuf -o0 -e0 "$H" $margs ${HATARI_ARGS:-} --cpulevel 3 --fpu 68882 --tos "$TOS" \
+    stdbuf -o0 -e0 "$H" $margs ${HATARI_ARGS:-} --cpulevel ${CPULEVEL:-3} --fpu 68882 --tos "$TOS" \
     --cpu-exact false --compatible false --addr24 false --fast-forward true \
     --sound off --confirm-quit false --natfeats on --conout 1 \
     --gemdos-drive C -d "$R/c" $autoarg --run-vbls "${VBLS:-200000}" \
