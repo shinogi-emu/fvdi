@@ -103,13 +103,15 @@ int main(void)
     vst_font(h, id);
     vst_point(h, 48, &cw, &ch, &bw, &bh);
 
-    /* vst_width: fVDI cannot change the width alone; it says what it has */
+    /* vst_width: as NVDI, an outline font takes the character width alone;
+     * the height stays and the cell narrows with the characters */
     w2 = h2 = cw2 = ch2 = -1;
     vst_width(h, cw / 2, &w2, &h2, &cw2, &ch2);
     snprintf(line, sizeof(line), "OUTLINE vst_width %d -> %d %d %d %d (point gave %d %d %d %d)",
              cw / 2, w2, h2, cw2, ch2, cw, ch, bw, bh);
     say(line);
-    check(w2 == cw && h2 == ch && cw2 == bw && ch2 == bh, "vst_width reports the sizes in effect");
+    check(w2 == cw / 2 && h2 == ch && ch2 == bh && cw2 >= w2 && cw2 < bw,
+          "vst_width sets the character width alone");
 
     /* The form of the outline */
     n = -1;
