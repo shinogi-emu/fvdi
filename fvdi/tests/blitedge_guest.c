@@ -73,20 +73,6 @@ static unsigned short store[6][IMG_WORDS];
 #define OTH  (&imgs[5])
 static Img imgs[6];
 
-/*
- * Operation 5 (D' = D, the destination unchanged) is left out of the
- * all-operations cases unless BLITEDGE_OP5 is defined: EmuTOS's
- * fast_bit_blt (vdi_blit.S) has no fragment for it (mode_05 is a dummy
- * label), jumps into the one for operation 6 and exclusive-ors the
- * destination's rightmost fringe pixels with leftovers in d0, so the
- * picture it leaves depends on what the registers held.
- */
-#ifdef BLITEDGE_OP5
-#define SKIP_OP(mode) 0
-#else
-#define SKIP_OP(mode) ((mode) == 5)
-#endif
-
 static void say(const char *text)
 {
     while (*text)
@@ -425,8 +411,6 @@ static void copy_overlap(int right)
     img_random(BG);
     for (mode = 0; mode < 16; mode++)
     {
-        if (SKIP_OP(mode))
-            continue;
         for (k = 1; k <= 17; k++)
         {
             int sx = right ? 40 + k : 40;           /* source left of the destination */
@@ -902,8 +886,6 @@ static void linea_copy_case(int bitblt)
     linea0();
     for (mode = 0; mode < 16; mode++)
     {
-        if (SKIP_OP(mode))
-            continue;
         for (xo = 0; xo < 16; xo += (bitblt ? 5 : 3))
         {
             int w = 19 + xo * 2, sx = 96 + ((xo * 7 + 1) & 15), dx = 8 + xo, sy = 4, dy = 1;
@@ -998,8 +980,6 @@ int main(void)
     full_clip();
     snprintf(line, sizeof(line), "BLITEDGE screen %dx%dx%d", width, height, planes);
     say(line);
-    if (SKIP_OP(5))
-        say("BLITEDGE note: operation 5 left out of the all-operations cases");
 
     graf_mouse(M_OFF, 0);
     wind_update(BEG_UPDATE);
