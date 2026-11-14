@@ -142,6 +142,6 @@ check-outledge-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI OUTLEDGE FAIL|FVDI TWICE FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI OUTLEDGE GUEST PASS' "$(GUEST_LOG)"
-	if grep -Fq 'TWICE run 2' "$(GUEST_LOG)"; then \
+	if grep -Fq 'TWICE run 1' "$(GUEST_LOG)"; then \
 		test "$$(grep -c 'FVDI OUTLEDGE GUEST PASS' "$(GUEST_LOG)")" -eq 2 && \
 		grep -Fq 'FVDI TWICE GUEST PASS' "$(GUEST_LOG)"; fi

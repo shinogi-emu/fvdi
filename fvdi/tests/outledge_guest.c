@@ -19,8 +19,10 @@
  *  6. writing modes 1-4 with effects 0-31: replace paints the text box,
  *     transparent leaves the background, xor twice restores it, reverse
  *     transparent paints what replace leaves blank; bold widens, light
- *     thins, italic slants, underline adds pixels below the baseline and
- *     outlined text is hollow.
+ *     thins, italic leans by 12 degrees, underline adds pixels below the
+ *     baseline and outlined text is hollow;
+ *  7. a string the engine cannot render (here for want of memory) is drawn
+ *     in the system font, and outline text draws again afterwards.
  *
  * Pixels are compared within the run, never with another VDI: what is
  * drawn is read back with vro_cpyfm into a memory form in device format.
@@ -880,20 +882,71 @@ static void rotation_check(void)
  * ===========================================================================
  */
 
-/* mean x of the ink in a band of rows */
-static long mean_x(const Map *m, short y0, short y1)
+/* the x of the leftmost ink in a screen row of a map, or -1 */
+static short left_edge(const Map *m, short sy)
 {
-    long sum = 0, n = 0;
-    short x, y;
+    short x;
 
-    for (y = y0; y < y1; y++)
-        for (x = m->x; x < m->x + m->w; x++)
-            if (ink_at(m, x, y))
-            {
-                sum += x;
-                n++;
-            }
-    return n ? (sum * 16) / n : 0;  /* in 1/16 pixels */
+    for (x = m->x; x < m->x + m->w; x++)
+        if (ink_at(m, x, sy))
+            return x;
+    return -1;
+}
+
+/*
+ * italic leans by 12 degrees: the left edge of an 'H' moves right going
+ * up.  The shift is the least-squares slope of the italic edge less the
+ * plain one, row by row above the baseline, times the rows measured; it
+ * must be tan 12 degrees times those rows, give or take a third (and at
+ * least a pixel and a half, for the rounding of small sizes).
+ */
+static void italic_check(short x, short y, short top)
+{
+    Map n, it;
+    double sr = 0, sd = 0, srr = 0, srd = 0, slope, shift, want, tol;
+    short r, r0 = 32767, r1 = -1, rows = 0;
+    char line[200];
+
+    if (!draw_map(&n, x, y, "H", 0, 0, 140, 90) || !draw_map(&it, x, y, "H", 4, 0, 140, 90))
+    {
+        check(0, "plain and italic 'H' draw");
+        free_map(&n);
+        return;
+    }
+    for (r = y; r < y + top; r++)
+    {
+        short a = left_edge(&n, r), b = left_edge(&it, r);
+
+        if (a < 0 || b < 0)
+            continue;
+        sr += r;
+        sd += b - a;
+        srr += (double)r * r;
+        srd += (double)r * (b - a);
+        rows++;
+        if (r < r0)
+            r0 = r;
+        if (r > r1)
+            r1 = r;
+    }
+    if (rows < 4)
+    {
+        check(0, "an 'H' with rows to measure the italic on");
+        free_map(&n);
+        free_map(&it);
+        return;
+    }
+    slope = (rows * srd - sr * sd) / (rows * srr - sr * sr);
+    shift = -slope * (r1 - r0);         /* rows go down the screen */
+    want = (r1 - r0) * 0.212557;        /* tan 12 degrees */
+    tol = want / 3 > 1.5 ? want / 3 : 1.5;
+    snprintf(line, sizeof(line),
+             "OUTLEDGE italic 'H': the left edge leans %ld/100 px over %d rows, %ld/100 expected (+-%ld/100)",
+             (long)(shift * 100), r1 - r0, (long)(want * 100), (long)(tol * 100));
+    say(line);
+    check(shift > want - tol && shift < want + tol, "italic leans the text right by 12 degrees");
+    free_map(&n);
+    free_map(&it);
 }
 
 static long ink_below(const Map *m, short base)
@@ -1017,18 +1070,14 @@ static void modes_check(void)
 
     if (maps[0].map && maps[1].map && maps[2].map && maps[4].map && maps[8].map)
     {
-        long n = maps[0].ink, sn, si;
+        long n = maps[0].ink;
 
         snprintf(line, sizeof(line), "OUTLEDGE ink: normal %ld, bold %ld, light %ld, italic %ld, underlined %ld, outlined %ld",
                  n, maps[1].ink, maps[2].ink, maps[4].ink, maps[8].ink, maps[16].ink);
         say(line);
         check(maps[1].ink > n + n / 20 && maps[1].w >= maps[0].w, "bold widens the text");
         check(maps[2].ink < (n * 3) / 4 && maps[2].ink > n / 4, "light thins the text");
-        sn = mean_x(&maps[0], y, y + ch / 2) - mean_x(&maps[0], y + ch / 2, y + ch);
-        si = mean_x(&maps[4], y, y + ch / 2) - mean_x(&maps[4], y + ch / 2, y + ch);
-        snprintf(line, sizeof(line), "OUTLEDGE slant (1/16 px, upper half less lower): normal %ld, italic %ld", sn, si);
-        say(line);
-        check(si > sn + ch, "italic slants the text to the right");
+        italic_check(x, y, ch);
         snprintf(line, sizeof(line), "OUTLEDGE ink below the baseline: normal %ld, underlined %ld",
                  ink_below(&maps[0], base + 1), ink_below(&maps[8], base + 1));
         say(line);
@@ -1124,6 +1173,99 @@ static void leftover_check(short id)
     check(same, "outline text is the same after skewed, bold, outlined system-font text");
     free_map(&before);
     free_map(&after);
+}
+
+/*
+ * ===========================================================================
+ * 7. What the engine cannot render
+ * ===========================================================================
+ */
+
+/* take all memory but pieces under 16 KB; returns the blocks taken */
+static short take_memory(void **blocks, short max)
+{
+    short n = 0;
+    long size;
+
+    while (n < max)
+    {
+        size = (long)Mxalloc(-1, 3);        /* the largest block, any RAM */
+        if (size == -32)                    /* no Mxalloc */
+            size = (long)Malloc(-1);
+        if (size < 16384)
+            break;
+        blocks[n] = (void *)Mxalloc(size, 3);
+        if ((long)blocks[n] == -32)
+            blocks[n] = (void *)Malloc(size);
+        if ((long)blocks[n] <= 0)
+            break;
+        n++;
+    }
+    return n;
+}
+
+/*
+ * A string whose bitmap needs a block of its own (over 16 KB) cannot be
+ * rendered while the memory is taken: it must then be drawn in the system
+ * font, not left out.  If the engine still finds the memory, nothing can
+ * be told, and that is said.
+ */
+static void fallback_check(void)
+{
+    static const char *s = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM";   /* 30, over 2000 px */
+    static void *blocks[512];
+    short cw, ch, bw, bh, ha, va, x0, y0, x1, y1, n, k, ext[8], cl[4];
+    char line[200];
+    Grab g;
+
+    vst_height(handle, 100, &cw, &ch, &bw, &bh);
+    vst_alignment(handle, 0, 5, &ha, &va);
+    vst_color(handle, 1);
+    vqt_extent(handle, s, ext);         /* the glyphs are loaded while there is memory */
+    fill(0, 0, scr_w - 1, 3 * ch, 0);
+
+    n = take_memory(blocks, 512);
+    cl[0] = 0; cl[1] = 0; cl[2] = scr_w - 1; cl[3] = scr_h - 1;
+    vs_clip(handle, 1, cl);             /* the system font does not clip itself */
+    vswr_mode(handle, 2);
+    v_gtext(handle, 20, 20, s);
+    clip_off();
+    for (k = 0; k < n; k++)
+        Mfree(blocks[k]);
+
+    if (!grab(&g, 0, 0, scr_w, 3 * ch))
+    {
+        check(0, "the screen read back after the fallback");
+        return;
+    }
+    if (!changed_box(&g, p0, &x0, &y0, &x1, &y1))
+    {
+        x0 = y0 = 0;
+        x1 = y1 = -1;
+    }
+    ungrab(&g);
+    snprintf(line, sizeof(line),
+             "OUTLEDGE %d blocks taken; a %d px string at height %d drew %d x %d at %d,%d",
+             n, ext[2], ch, x1 - x0 + 1, y1 - y0 + 1, x0, y0);
+    say(line);
+    if (y1 - y0 + 1 > 2 * 16)
+        say("OUTLEDGE the engine still had the memory: the fallback could not be provoked");
+    else
+        check(y1 >= y0, "a string the engine cannot render is drawn in the system font");
+
+    /* with the memory back, outline text again */
+    fill(0, 0, scr_w - 1, 3 * ch, 0);
+    vswr_mode(handle, 2);
+    v_gtext(handle, 20, 20, "MH");
+    if (grab(&g, 0, 0, scr_w, 3 * ch))
+    {
+        int any = changed_box(&g, p0, &x0, &y0, &x1, &y1);
+
+        ungrab(&g);
+        snprintf(line, sizeof(line), "OUTLEDGE afterwards \"MH\" drew %d rows", any ? y1 - y0 + 1 : 0);
+        say(line);
+        check(any && y1 - y0 + 1 > ch / 2, "outline text draws again once memory is back");
+    }
 }
 
 /*
@@ -1250,6 +1392,9 @@ int main(void)
     if (!still_selected(id, "justification"))
         goto done;
     justified_check();
+    if (!still_selected(id, "fallback"))
+        goto done;
+    fallback_check();
 
 done:
     {
