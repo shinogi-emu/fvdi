@@ -6,7 +6,10 @@
  * contours that start with a jump and close, Bezier segments - and then by
  * filling it with v_bez_fill into an off-screen bitmap: the ring must be
  * filled and the hole must not.  Needs a 16-bit (or deeper) screen for
- * that, and a FreeType font.
+ * that, and off-screen bitmaps, which the EdDI cookie announces (on a VDI
+ * without them v_open_bm would open a screen workstation and write its
+ * 45 work_out words into the binding's one); without either, the fill
+ * check is skipped.  Needs an outline font.
  *
  * Run under the AES.  Reports over BIOS device 1 (serial) and ends with
  * "FVDI OUTLINE GUEST PASS" or "FVDI OUTLINE FAIL: <check>".
@@ -39,6 +42,7 @@ short v_open_bm(short base_handle, GCBITMAP *bitmap, short color_flags,
 void v_clsbm(short handle);
 
 #define MAXPTS 600
+#define EDDI_COOKIE 0x45644449UL    /* 'EdDI': the VDI has off-screen bitmaps */
 
 static int failed;
 static short xy[MAXPTS * 2], xy2[MAXPTS * 2];
@@ -50,6 +54,23 @@ static void say(const char *text)
         Bconout(1, *text++);
     Bconout(1, '\r');
     Bconout(1, '\n');
+}
+
+/* is there an EdDI cookie?  (the jar is in supervisor memory) */
+static long eddi_found;
+
+static long find_eddi(void)
+{
+    long *jar = *(long **) 0x5A0L;
+
+    eddi_found = 0;
+    while (jar && jar[0])
+    {
+        if ((unsigned long) jar[0] == EDDI_COOKIE)
+            eddi_found = 1;
+        jar += 2;
+    }
+    return 0;
 }
 
 static void check(int ok, const char *what)
@@ -170,7 +191,10 @@ int main(void)
 
     /* Fill it: ring black, hole white */
     vq_extnd(h, 1, work_out);
-    if (work_out[4] >= 16)
+    Supexec(find_eddi);
+    if (work_out[4] >= 16 && !eddi_found)
+        say("OUTLINE no EdDI cookie, no off-screen bitmaps - fill check skipped");
+    else if (work_out[4] >= 16)
     {
         short bmh, x, y, ok_ring, ok_hole;
         unsigned short *row;

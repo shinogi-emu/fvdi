@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -25,6 +25,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) realext_guest.c -lgem -o $(TEST_BUILD)/REALEXT.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) nvdimisc_guest.c -lgem -o $(TEST_BUILD)/NVDIMISC.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) outline_guest.c -lgem -o $(TEST_BUILD)/OUTLINE.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) nvditext_guest.c -lgem -o $(TEST_BUILD)/NVDITEXT.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) vdibench_guest.c -lgem -o $(TEST_BUILD)/VDIBENCH.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) -DVDIBENCH_NOBLIT=1 vdibench_guest.c -lgem -o $(TEST_BUILD)/VDIBENCB.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) pens_guest.c -lgem -o $(TEST_BUILD)/PENS.PRG
@@ -105,6 +106,14 @@ check-outline-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI OUTLINE FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI OUTLINE GUEST PASS' "$(GUEST_LOG)"
+
+# NVDITEXT.PRG: the NVDI text calls a web browser uses on an outline font -
+# arbitrary sizes, Unicode text, v_ftext and its offsets, advances, widths,
+# skew, kerning, character indices, the font header and lookups by id.
+check-nvditext-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI NVDITEXT FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI NVDITEXT GUEST PASS' "$(GUEST_LOG)"
 
 # VDIBENCH.PRG: lines, text, blits and fills timed with the 200 Hz timer,
 # each followed by a CRC-32 of the screen.  Compare two drivers by their

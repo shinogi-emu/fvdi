@@ -13,7 +13,14 @@
  * C:\VTEST\TESTFONT.TTF) and
  * pass its family name as the first argument (default "DejaVu Sans").  It
  * copies the file into <font folder>\HWFONTS\ itself, so the font cannot
- * have been there when fVDI loaded its fonts.
+ * have been there when the VDI loaded its fonts.  A file that is no font
+ * at all is put there first: the rescan must refuse it and add nothing.
+ *
+ * Any VDI that answers HighWire's GDOS question and publishes the vectors
+ * passes: vq_vgdos must give one of the values HighWire accepts ('_FSM',
+ * -65536 or 'fVDI'), and the fVDI cookie, where there is one, must flag
+ * the vectors as real.  As under any GDOS, the fonts are loaded with
+ * vst_load_fonts before they are listed.
  *
  * Every check is reported over BIOS device 1, the serial port, and the run
  * ends with "FVDI FONTSCAN GUEST PASS" or "FVDI FONTSCAN FAIL: <check>".
@@ -29,6 +36,7 @@
 #define NVDI_COOKIE 0x4E564449UL    /* 'NVDI' */
 #define FVDI_COOKIE 0x66564449UL    /* 'fVDI' */
 #define NVDI_FONTSCAN 0x0100        /* fVDI cookie flag: the vectors are real */
+#define GDOS_FSM 0x5F46534DL        /* '_FSM': SpeedoGDOS, or NVDI with outline fonts */
 #define MAX_DIRS 16
 #define DIR_SIZE 256
 
@@ -252,6 +260,21 @@ static int copy_file(const char *from, const char *to)
     return ok;
 }
 
+/* a file with a font's name that holds no font */
+static int write_garbage(const char *to)
+{
+    static char buf[4096];
+    long out;
+    int ok;
+
+    memset(buf, 'X', sizeof(buf));
+    if ((out = Fcreate(to, 0)) < 0)
+        return 0;
+    ok = Fwrite((short) out, sizeof(buf), buf) == sizeof(buf);
+    Fclose((short) out);
+    return ok;
+}
+
 int main(int argc, char **argv)
 {
     const char *family = argc > 1 ? argv[1] : "DejaVu Sans";
@@ -271,19 +294,24 @@ int main(int argc, char **argv)
     if (failed)
         goto out;
 
+    /* What HighWire asks before anything else (HighWire.c, main()) */
     gdos = vq_vgdos();
-    check(!memcmp(&gdos, "fVDI", 4), "vq_vgdos says fVDI");
+    snprintf(line, sizeof(line), "FONTSCAN vq_vgdos %08lx", gdos);
+    say(line);
+    check(gdos == GDOS_FSM || gdos == -65536L || !memcmp(&gdos, "fVDI", 4),
+          "vq_vgdos gives a value HighWire accepts");
 
     nvdi = get_cookie(NVDI_COOKIE);
     fvdi = get_cookie(FVDI_COOKIE);
     check(nvdi != NULL, "NVDI cookie present");
-    check(fvdi != NULL, "fVDI cookie present");
     if (failed)
         goto out;
-    snprintf(line, sizeof(line), "FONTSCAN NVDI version %04x, fVDI flags %04x", nvdi[0], fvdi[1]);
+    snprintf(line, sizeof(line), "FONTSCAN NVDI version %04x, fVDI cookie %s, flags %04x",
+             nvdi[0], fvdi ? "present" : "absent", fvdi ? fvdi[1] : 0);
     say(line);
     check(nvdi[0] >= 0x0500 && nvdi[0] <= 0x0599, "NVDI version is 5.x");
-    check((fvdi[1] & NVDI_FONTSCAN) != 0, "fVDI cookie flags the font vectors as real");
+    if (fvdi)
+        check((fvdi[1] & NVDI_FONTSCAN) != 0, "fVDI cookie flags the font vectors as real");
     scan_fn = *(void **) ((char *) nvdi + 0xAC);
     getdir_fn = *(void **) ((char *) nvdi + 0xB0);
     check(scan_fn && !((long) scan_fn & 1), "scan_fonts vector usable");
@@ -291,15 +319,16 @@ int main(int argc, char **argv)
     if (failed)
         goto out;
 
+    before = font_count();               /* GDOS: load the fonts, then list them */
+    snprintf(line, sizeof(line), "FONTSCAN fonts before: %d", before);
+    say(line);
+
     check(font_folder(folder), "font folder found from a loaded font's path");
     if (failed)
         goto out;
     snprintf(line, sizeof(line), "FONTSCAN font folder %s", folder);
     say(line);
 
-    before = font_count();
-    snprintf(line, sizeof(line), "FONTSCAN fonts before: %d", before);
-    say(line);
     check(family_id(family, name) == 0, "test family not loaded at boot");
     if (failed)
         goto out;
@@ -308,6 +337,19 @@ int main(int argc, char **argv)
     snprintf(extra_dir, sizeof(extra_dir), "%sHWFONTS\\", folder);
     snprintf(target, sizeof(target), "%sHWFONTS", folder);
     (void) Dcreate(target);              /* may exist already */
+
+    /* A download that is no font: refused, and nothing else changes */
+    snprintf(target, sizeof(target), "%sHWFONTS\\BADFONT.TTF", folder);
+    check(write_garbage(target), "a file that is no font written into HWFONTS");
+    if (failed)
+        goto out;
+    Supexec(rescan_super);
+    after = font_count();
+    snprintf(line, sizeof(line), "FONTSCAN fonts after the bad file: %d", after);
+    say(line);
+    check(after == before, "a file that is no font adds nothing");
+    (void) Fdelete(target);
+
     snprintf(target, sizeof(target), "%sHWFONTS\\TESTFONT.TTF", folder);
     check(copy_file(SOURCE_FONT, target) || copy_file(SOURCE_FONT2, target),
           "font copied into HWFONTS");
@@ -322,6 +364,16 @@ int main(int argc, char **argv)
     after = font_count();
     snprintf(line, sizeof(line), "FONTSCAN fonts after: %d", after);
     say(line);
+    for (id = before + 2; id <= after + 1 && id <= before + 6; id++)
+    {
+        XFNT_INFO xi;
+
+        if (vqt_xfntinfo(handle, 0x0009, 0, id, &xi))
+        {
+            snprintf(line, sizeof(line), "FONTSCAN added: %d '%s' %s", xi.id, xi.font_name, xi.file_name1);
+            say(line);
+        }
+    }
     check(after == before + 1, "exactly one font added");
 
     id = family_id(family, name);
