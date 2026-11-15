@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-edges-log check-nvdicol-log check-scrninfo-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -34,6 +34,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) edges_guest.c -lgem -o $(TEST_BUILD)/EDGES.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) nvdicol_guest.c -lgem -o $(TEST_BUILD)/NVDICOL.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) scrninfo_guest.c -lgem -o $(TEST_BUILD)/SCRNINFO.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) bmrgb_guest.c -lgem -o $(TEST_BUILD)/BMRGB.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
@@ -178,3 +179,12 @@ check-scrninfo-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI SCRNINFO FAIL|Panic' "$(GUEST_LOG)"
 	grep -Eq 'FVDI SCRNINFO GUEST (PASS|SKIPPED)' "$(GUEST_LOG)"
+
+# BMRGB.PRG: RGB fill, text and line backgrounds in replace mode drawn on a
+# 16-bit screen and into two v_open_bm bitmaps (one in the program's memory
+# at 2 mod 4 with lines of 2 mod 4 bytes): expected colours, and the three
+# pictures equal pixel for pixel.  Skipped on screens with planes.
+check-bmrgb-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI BMRGB FAIL|Panic' "$(GUEST_LOG)"
+	grep -Eq 'FVDI BMRGB GUEST (PASS|SKIPPED)' "$(GUEST_LOG)"
