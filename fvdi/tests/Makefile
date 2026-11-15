@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-edges-log check-nvdicol-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-edges-log check-nvdicol-log check-scrninfo-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -33,6 +33,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) outledge_guest.c -lgem -o $(TEST_BUILD)/OUTLEDGE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) edges_guest.c -lgem -o $(TEST_BUILD)/EDGES.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) nvdicol_guest.c -lgem -o $(TEST_BUILD)/NVDICOL.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) scrninfo_guest.c -lgem -o $(TEST_BUILD)/SCRNINFO.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
@@ -170,3 +171,10 @@ check-nvdicol-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI NVDICOL FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI NVDICOL GUEST PASS' "$(GUEST_LOG)"
+
+# SCRNINFO.PRG: vq_scrninfo on a 16-bit screen as fVDI's 16_bit.sys answers,
+# and a round trip of pixels built from the described bit positions.
+check-scrninfo-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI SCRNINFO FAIL|Panic' "$(GUEST_LOG)"
+	grep -Eq 'FVDI SCRNINFO GUEST (PASS|SKIPPED)' "$(GUEST_LOG)"
