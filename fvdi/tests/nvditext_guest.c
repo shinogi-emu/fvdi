@@ -6,7 +6,9 @@
  * vst_kern and vst_track_offset, vst_scratch, vqt_char_index,
  * vqt_fontheader, and vqt_xfntinfo and vqt_name_and_id by id; and a
  * workstation that never called vst_load_fonts selecting an outline font
- * by its id, as HighWire does at its start.
+ * by its id, as HighWire does at its start.  v_ftext_offset is also used
+ * with the system font, with effects and rotated, where the VDI draws
+ * through its text scratch buffer, with offsets beyond its first half.
  *
  * The checks follow NVDI's documentation and compare a VDI with itself:
  * what is drawn is read back with vro_cpyfm into a memory form.  fVDI
@@ -216,6 +218,28 @@ static int area(Grab *g, Box *b)
         return 0;
     ink_box(g, 0, AREA_W - 1, b);
     return 1;
+}
+
+/* the starts of the runs of columns (or rows) with ink; their number */
+static short runs(const Grab *g, int by_rows, short *start, short max)
+{
+    short n = 0, i, j, len = by_rows ? g->h : g->w, across = by_rows ? g->w : g->h;
+    int ink, before = 0;
+
+    for (i = 0; i < len; i++)
+    {
+        ink = 0;
+        for (j = 0; j < across && !ink; j++)
+            ink = by_rows ? at(g, j, i) != blank : at(g, i, j) != blank;
+        if (ink && !before)
+        {
+            if (n < max)
+                start[n] = i;
+            n++;
+        }
+        before = ink;
+    }
+    return n;
 }
 
 /* the leftmost ink of row y, -1 if none */
@@ -563,6 +587,103 @@ static void misc(short id, const char *fname, short index)
 }
 
 /*
+ * v_ftext_offset with the system font, once with effects (bold, italic,
+ * outlined) and once rotated by 90 degrees: the VDI draws both through its
+ * text scratch buffer, which must not disturb the offsets of the
+ * characters still to draw.  59 spaces, drawn too but without ink, take
+ * the offsets past the first 212 bytes; then five 'I's follow, and both
+ * where the first lands and their spacing are checked.
+ */
+#define SPACES  59
+
+static void offsets_case(const char *what, int rotated, short x, short y, short step, short gap)
+{
+    static short off[2 * (SPACES + 5)];
+    static char text[SPACES + 6];
+    short n, i, ok, start[8], want = -1;
+    char line[200];
+    Grab g;
+
+    /*
+     * where the first 'I' must land: drawn alone by v_gtext at its point,
+     * past the 58 steps of the spaces after the first (whose offset is 0)
+     */
+    clear_area();
+    if (rotated)
+        v_gtext(handle, x, y - (SPACES - 1) * step - gap, "I");
+    else
+        v_gtext(handle, x + (SPACES - 1) * step + gap, y, "I");
+    if (grab(&g, AREA_X, AREA_Y, AREA_W, AREA_H))
+    {
+        if (runs(&g, rotated, start, 8) == 1)
+            want = start[0];
+        ungrab(&g);
+    }
+
+    for (i = 0; i < SPACES + 5; i++)
+    {
+        short d = i < SPACES ? step : gap;
+
+        text[i] = i < SPACES ? ' ' : 'I';
+        off[2 * i] = rotated ? 0 : (i ? d : 0);
+        off[2 * i + 1] = rotated ? (i ? -d : 0) : 0;
+    }
+    text[SPACES + 5] = 0;
+
+    clear_area();
+    v_ftext_offset(handle, x, y, text, off);
+    if (!grab(&g, AREA_X, AREA_Y, AREA_W, AREA_H))
+        return;
+    n = runs(&g, rotated, start, 8);
+    if (rotated)                /* top to bottom is last to first */
+        for (i = 0; i < n / 2 && n <= 8; i++)
+        {
+            short t = start[i];
+
+            start[i] = start[n - 1 - i];
+            start[n - 1 - i] = t;
+        }
+    ok = n == 5;
+    for (i = 1; i < 5 && ok; i++)
+    {
+        short d = rotated ? start[i - 1] - start[i] : start[i] - start[i - 1];
+
+        ok = d >= gap - 1 && d <= gap + 1;
+    }
+    if (ok)
+        ok = want >= 0 && start[0] >= want - 1 && start[0] <= want + 1;
+    snprintf(line, sizeof(line), "NVDITEXT system font %s: %d characters at %d %d %d %d %d (first as v_gtext: %d)",
+             what, n, start[0], start[1], start[2], start[3], start[4], want);
+    say(line);
+    snprintf(line, sizeof(line), "v_ftext_offset places %s system-font characters at their offsets", what);
+    check(ok, line);
+    ungrab(&g);
+}
+
+static void bitmap_offsets(short id)
+{
+    short cw, ch, bw, bh, m;
+
+    vst_font(handle, 1);
+    vst_point(handle, 10, &cw, &ch, &bw, &bh);
+    vswr_mode(handle, MD_TRANS);
+    vst_alignment(handle, 0, 5, &m, &m);
+
+    /* the first 'I' 4 * 58 + 30 pixels right of the start, then every 30 */
+    vst_effects(handle, 1 | 4 | 16);
+    offsets_case("with effects", 0, AREA_X + 10, AREA_Y + 10, 4, 30);
+    vst_effects(handle, 0);
+
+    /* rotated: the first 'I' 58 + 16 pixels up from the start, then every 16 */
+    vst_rotation(handle, 900);
+    offsets_case("rotated", 1, AREA_X + 20, AREA_Y + 155, 1, 16);
+    vst_rotation(handle, 0);
+
+    vst_alignment(handle, 0, 0, &m, &m);
+    vst_font(handle, id);
+}
+
+/*
  * HighWire selects the fonts of its configuration before it calls
  * vst_load_fonts: a workstation that has not called it must find them
  */
@@ -635,6 +756,7 @@ int main(void)
     widths();
     skew();
     misc(id, fname, index);
+    bitmap_offsets(id);
     unloaded(id, fname);
 
 out:

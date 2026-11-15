@@ -106,6 +106,23 @@ static long jar_walk(void)
     return 0;
 }
 
+/* how many cookies with this tag the jar holds */
+static long cookie_count;
+
+static long jar_count(void)
+{
+    long *jar = *(long **) 0x5A0L;
+
+    cookie_count = 0;
+    while (jar && jar[0])
+    {
+        if ((unsigned long) jar[0] == cookie_wanted)
+            cookie_count++;
+        jar += 2;
+    }
+    return 0;
+}
+
 static void *get_cookie(unsigned long id)
 {
     cookie_wanted = id;
@@ -306,6 +323,9 @@ int main(int argc, char **argv)
     check(nvdi != NULL, "NVDI cookie present");
     if (failed)
         goto out;
+    cookie_wanted = NVDI_COOKIE;
+    Supexec(jar_count);
+    check(cookie_count == 1, "exactly one NVDI cookie in the jar");
     snprintf(line, sizeof(line), "FONTSCAN NVDI version %04x, fVDI cookie %s, flags %04x",
              nvdi[0], fvdi ? "present" : "absent", fvdi ? fvdi[1] : 0);
     say(line);
