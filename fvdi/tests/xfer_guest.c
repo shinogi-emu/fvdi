@@ -927,13 +927,20 @@ static void test_refusals(short h)
 
         transfer(screen, &src, NULL, sr, r3, 0);
     }
+    /* memory that is the screen: the workstation is the screen, not a bitmap in memory */
+    mk_dst(&dst2, (unsigned char *)Logbase(), line_bytes(1024), 1024, 128);
+    {
+        short r4[4] = { AX + 4, AY + 4, AX + 4 + SW - 1, AY + 4 + SH - 1 };
+
+        transfer(screen, &src, &dst2, sr, r4, 0);
+    }
     grab(areaB, &pitchB, AX, AY, AW, AH);
     bad = 0;
     for (y = 0; y < AH; y++)
         for (x = 0; x < AW; x++)
             if (dev_get(areaA, pitchA, x, y) != dev_get(areaB, pitchB, x, y))
                 bad++;
-    check(bad == 0, "refused calls leave the screen as it was");
+    check(bad == 0, "refused calls (a destination that is the screen's own memory too) leave the screen as it was");
     (void)h;
 }
 
@@ -954,7 +961,7 @@ static unsigned long mfdb_pixel(MFDB *b, int x, int y)
                   ((long)y * b->fd_wdwidth + x / 16) * b->fd_nplanes + p;
 
         if (words[at] & (0x8000U >> (x & 15)))
-            value |= 1UL << p;
+            value |= 1UL << ((b->fd_stand && planes == 16) ? 15 - p : p);   /* as vr_trnfm: plane 0 is bit 15 */
     }
     return value;
 }
@@ -974,8 +981,67 @@ static void mfdb_put(MFDB *b, int x, int y, unsigned long value)
         long at = b->fd_stand ? ((long)p * b->fd_h + y) * b->fd_wdwidth + x / 16 :
                   ((long)y * b->fd_wdwidth + x / 16) * b->fd_nplanes + p;
 
-        if (value & (1UL << p))
+        if (value & (1UL << ((b->fd_stand && planes == 16) ? 15 - p : p)))
             words[at] |= 0x8000U >> (x & 15);
+    }
+}
+
+/* a 16-plane standard form through a scaled copy is what vr_trnfm and an unscaled copy make of it */
+static void std16_test(short h)
+{
+    MFDB std, dev, a, b;
+    static unsigned short sw_[16 * 8], dv[16 * 8], ra[16 * 8 * 4], rb[16 * 8 * 4];
+    short xy[8] = { 0, 0, 15, 7, 0, 0, 15, 7 }, xy2[8] = { 0, 0, 15, 7, 0, 0, 31, 15 };
+    int i, mode;
+
+    if (planes != 16)
+        return;
+    for (i = 0; i < 16 * 8; i++)
+        sw_[i] = (unsigned short)(i * 40503u + 12345u);
+    memset(&std, 0, sizeof(std));
+    std.fd_addr = sw_;
+    std.fd_w = 16;
+    std.fd_h = 8;
+    std.fd_wdwidth = 1;
+    std.fd_stand = 1;
+    std.fd_nplanes = 16;
+    dev = std;
+    dev.fd_addr = dv;
+    dev.fd_stand = 0;
+    vr_trnfm(h, &std, &dev);
+    for (mode = 0; mode < 2; mode++)
+    {
+        short *p = mode ? xy2 : xy;
+
+        memset(ra, 0x11, sizeof(ra));
+        memset(rb, 0x11, sizeof(rb));
+        a = dev;
+        a.fd_addr = ra;
+        a.fd_w = 32;
+        a.fd_h = 16;
+        a.fd_wdwidth = 2;
+        b = a;
+        b.fd_addr = rb;
+        vro_cpyfm(h, 3 | 0x8000, p, &std, &a);
+        vro_cpyfm(h, 3 | 0x8000, p, &dev, &b);
+        check(memcmp(ra, rb, sizeof(ra)) == 0, mode ? "a 16-plane standard form scaled 2x is what vr_trnfm makes of it"
+                                                    : "a 16-plane standard form copied 1:1 is what vr_trnfm makes of it");
+    }
+    memset(ra, 0x11, sizeof(ra));
+    a = dev;
+    a.fd_addr = ra;
+    a.fd_w = 32;
+    a.fd_h = 16;
+    a.fd_wdwidth = 2;
+    vro_cpyfm(h, 3, xy, &dev, &a);
+    {
+        int x, y, bad = 0;
+
+        for (y = 0; y < 8; y++)
+            for (x = 0; x < 16; x++)
+                if (ra[y * 32 + x] != dv[y * 16 + x])
+                    bad++;
+        check(bad == 0, "the unscaled copy of the transformed form is the transformed form");
     }
 }
 
@@ -1302,6 +1368,7 @@ int main(void)
     test_refusals(screen);
     say("XFER refusals done");
     legacy_test(screen);
+    std16_test(screen);
     legacy_refusals(screen);
     say("XFER bit 15 done");
     test_bitmap(screen);
