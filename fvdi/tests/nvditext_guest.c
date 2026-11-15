@@ -18,6 +18,12 @@
  * Needs an outline font in the GDOS font folder.  Run under the AES.
  * Reports over BIOS device 1 (serial) and ends with
  * "FVDI NVDITEXT GUEST PASS" or "FVDI NVDITEXT FAIL: <check>".
+ *
+ * The test draws on the screen without a window of its own, so it holds
+ * the AES screen lock (wind_update BEG_UPDATE) and hides the mouse from
+ * its first drawing to its last: under a multitasking AES the desktop,
+ * started at the same time, otherwise paints its background over the
+ * working area between a drawing and its readback.
  */
 
 #include <gem.h>
@@ -712,7 +718,7 @@ int main(void)
 {
     short work_in[11] = { 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2 };
     short work_out[57];
-    short cw, ch, bw, bh, fonts, id, index;
+    short cw, ch, bw, bh, fonts, id, index, locked = 0;
     char fname[40], line[200];
 
     say("NVDITEXT start");
@@ -722,6 +728,9 @@ int main(void)
     check(handle > 0, "virtual workstation");
     if (failed)
         goto out;
+    graf_mouse(M_OFF, 0);
+    wind_update(BEG_UPDATE);
+    locked = 1;
     scr_w = work_out[0] + 1;
     scr_h = work_out[1] + 1;
     vq_extnd(handle, 1, work_out);
@@ -760,6 +769,11 @@ int main(void)
     unloaded(id, fname);
 
 out:
+    if (locked)
+    {
+        wind_update(END_UPDATE);
+        graf_mouse(M_ON, 0);
+    }
     if (handle > 0)
         v_clsvwk(handle);
     appl_exit();
