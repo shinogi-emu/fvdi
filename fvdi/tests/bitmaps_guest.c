@@ -97,12 +97,34 @@ static unsigned short pixel_at(const unsigned char *base, long wrap, short x, sh
     return v;
 }
 
+/* is there an 'fVDI' cookie (the jar is in supervisor memory)? */
+static long jar_has_fvdi(void)
+{
+    long *jar = *(long **)0x5A0L;
+
+    while (jar && jar[0])
+    {
+        if ((unsigned long)jar[0] == 0x66564449UL)
+            return 1;
+        jar += 2;
+    }
+    return 0;
+}
+
+/*
+ * The pixel: fVDI answers v_get_pixel with it in intout[0] and -1 in
+ * intout[1], EmuTOS's own VDI with 0 in intout[0] and the pixel in
+ * intout[1] on a 16-bit screen.
+ */
 static short pel_at(short h, short x, short y)
 {
-    short pel = 0x5555, index;
+    static short fvdi = -1;
+    short pel = 0x5555, index = 0x5555;
 
+    if (fvdi < 0)
+        fvdi = (short)Supexec(jar_has_fvdi);
     v_get_pixel(h, x, y, &pel, &index);
-    return pel;
+    return (planes == 16 && !fvdi) ? index : pel;
 }
 
 /* 16-byte aligned, with 16 spare bytes each side, as NVDI asks */
@@ -308,8 +330,14 @@ int main(void)
             vro_cpyfm(screen, S_ONLY, xy, &bmf, &scr);
             check(pel_at(screen, x0 + 8, 104) == black && pel_at(screen, x0 + 39, 111) == black,
                   dx ? "bitmap to screen, shifted: the bar arrives" : "bitmap to screen, aligned: the bar arrives");
+            /*
+             * beside the copy is the screen's own white (pen 0), which a
+             * 16-bit screen of EmuTOS's VDI draws as 0xffdf (it has no
+             * spare bit), where the bitmap's memory starts as 0xffff
+             */
             check(pel_at(screen, x0 + 7, 104) == white && pel_at(screen, x0 + 40, 111) == white &&
-                  pel_at(screen, x0 - 1, 104) == white && pel_at(screen, x0 + 64, 104) == white,
+                  pel_at(screen, x0 - 1, 104) == pel_at(screen, 190, 95) &&
+                  pel_at(screen, x0 + 64, 104) == pel_at(screen, 190, 95),
                   dx ? "bitmap to screen, shifted: nothing beside it" : "bitmap to screen, aligned: nothing beside it");
         }
         /* and back: the screen's bar into the bitmap, 5 pixels further on */
