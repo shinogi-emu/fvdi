@@ -33,6 +33,12 @@
  *   faces=N    at least N outline faces must be listed, all selectable
  *   lowmem     memory is short: faces may fall back to the system font,
  *              and only the listing and per-face checks are made
+ *   face=NAME  the checks after the listing use the face named NAME (up
+ *              to the end of the line), or else one whose name starts
+ *              with it, instead of Liberation Sans; it must be listed
+ *
+ * Every face draws "Abg" and, in the Atari set, "\x8e\x84\x9a" (A, a
+ * and U with dieresis, built of two glyphs in some fonts), and is measured.
  *
  * Run under the AES.  Reports over BIOS device 1 (serial) and ends with
  * "FVDI OUTLEDGE GUEST PASS" or "FVDI OUTLEDGE FAIL: <check>".
@@ -63,6 +69,10 @@ static int failed;
 static short handle, scr_w, scr_h, planes, distinct, bg = FILL;
 static unsigned long p0, p1, pfill;     /* blank, text and background pixels */
 static short want_faces, lowmem;
+static char want_face[40];
+
+/* what each face draws: A, a and U with dieresis are built of two glyphs in some fonts */
+#define FACE_TEXT "Abg\x8e\x84\x9a"
 
 static void say(const char *text)
 {
@@ -113,6 +123,14 @@ static void read_config(void)
         want_faces = atoi(p + 6);
     if (strstr(buf, "lowmem"))
         lowmem = 1;
+    if ((p = strstr(buf, "face=")) != NULL)
+    {
+        short i;
+
+        for (i = 0, p += 5; i < (short)sizeof(want_face) - 1 && *p && *p != '\r' && *p != '\n'; i++)
+            want_face[i] = *p++;
+        want_face[i] = 0;
+    }
 }
 
 /*
@@ -328,16 +346,18 @@ static short pick_font(short fonts, short sysfonts, char *chosen)
     short i, id, rank, best = 0, best_rank = 0;
 
     /*
-     * a proportional face with plain stems, where H, a and g tell the
-     * effects apart: Liberation Sans, then any of its styles, then the
-     * first face with a name
+     * the face of OUTLEDGE.CFG, or a proportional face with plain stems,
+     * where H, a and g tell the effects apart: Liberation Sans, then any
+     * of its styles, then the first face with a name
      */
     for (i = sysfonts + 1; i <= sysfonts + fonts; i++)
     {
         id = vqt_name(handle, i, name);
         if (id < 5000 || !plausible_name(name))
             continue;
-        rank = strcmp(name, "Liberation Sans") == 0 ? 3 :
+        rank = (want_face[0] && strcmp(name, want_face) == 0) ? 5 :
+               (want_face[0] && strncmp(name, want_face, strlen(want_face)) == 0) ? 4 :
+               strcmp(name, "Liberation Sans") == 0 ? 3 :
                strncmp(name, "Liberation Sans", 15) == 0 ? 2 : 1;
         if (rank > best_rank)
         {
@@ -354,6 +374,7 @@ static short fonts_check(short sysfonts, short *fonts_out)
     char line[200], name[40];
     short fonts, i, id, outline = 0, named = 0, again;
     short cw, ch, bw, bh, fallback = 0, drawn = 0, blank = 0, blank_fallback = 0, bad_name = 0, ids_ok = 1, k;
+    short bad_extent = 0, ext[8];
     static short seen[512];
     long t;
 
@@ -431,10 +452,11 @@ static short fonts_check(short sysfonts, short *fonts_out)
         }
         vst_point(handle, 12, &cw, &ch, &bw, &bh);
         vst_alignment(handle, 0, 5, &cw, &ch);
-        fill(0, 0, 159, 39, 0);
+        fill(0, 0, 239, 39, 0);
         vst_color(handle, 1);
-        text(4, 4, "Abg", 2, 0, 0);
-        if (grab(&g, 0, 0, 160, 40))
+        text(4, 4, FACE_TEXT, 2, 0, 0);
+        vqt_extent(handle, FACE_TEXT, ext);
+        if (grab(&g, 0, 0, 240, 40))
         {
             if (changed_box(&g, p0, &x0, &y0, &x1, &y1))
             {
@@ -443,6 +465,13 @@ static short fonts_check(short sysfonts, short *fonts_out)
                 {
                     bad_name++;
                     snprintf(line, sizeof(line), "OUTLEDGE face %d draws, but its name '%s' is not plausible", id, name);
+                    say(line);
+                }
+                if (ext[2] - ext[0] <= 0 || ext[5] - ext[3] <= 0)
+                {
+                    bad_extent++;
+                    snprintf(line, sizeof(line), "OUTLEDGE face %d draws, but measures %d x %d", id,
+                             ext[2] - ext[0], ext[5] - ext[3]);
                     say(line);
                 }
             }
@@ -462,6 +491,7 @@ static short fonts_check(short sysfonts, short *fonts_out)
     say(line);
     check(blank_fallback == 0, "a face replaced by the system font draws in the system font");
     check(bad_name == 0, "every face that draws has a plausible name");
+    check(bad_extent == 0, "every face that draws is measured");
     if (want_faces)
     {
         /* a damaged file may still give a face, which then has nothing to draw */
@@ -1366,6 +1396,11 @@ int main(void)
     id = pick_font(fonts, sysfonts, chosen);
     snprintf(line, sizeof(line), "OUTLEDGE using font %d '%s'", id, chosen);
     say(line);
+    if (want_face[0])
+    {
+        snprintf(line, sizeof(line), "the face named in OUTLEDGE.CFG ('%s') is listed", want_face);
+        check(id && strncmp(chosen, want_face, strlen(want_face)) == 0, line);
+    }
     if (!id || vst_font(handle, id) != id)
     {
         check(0, "the outline face is selected");
