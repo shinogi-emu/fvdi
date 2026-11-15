@@ -126,6 +126,7 @@ int main(void)
     char line[160];
     MFDB m, screen;
     static const short want[] = { 2, 2, 16, 1, 0 };
+    short locked = 0;
 
     say("SCRNINFO start");
     check(appl_init() >= 0, "AES application registration");
@@ -147,6 +148,10 @@ int main(void)
         return 0;
     }
 
+    /* the readbacks below: no desktop repaint meanwhile */
+    graf_mouse(M_OFF, 0);
+    wind_update(BEG_UPDATE);
+    locked = 1;
     vq_scrn();
     memcpy(info, intout, sizeof(info));
     snprintf(line, sizeof(line), "SCRNINFO words 0..15: %d %d %d %d %d %d %04x%04x %d %d %d %d %d %d %d %d",
@@ -270,6 +275,11 @@ int main(void)
     }
 
 out:
+    if (locked)
+    {
+        wind_update(END_UPDATE);
+        graf_mouse(M_ON, 0);
+    }
     if (handle > 0)
         v_clsvwk(handle);
     appl_exit();
