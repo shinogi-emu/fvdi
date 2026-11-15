@@ -293,11 +293,17 @@ int main(void)
     one("system font, effects", 0, 0);
     vst_effects(h, 0);
 
-    /* fVDI never rotates text; the system's own VDI does */
-    if (!fvdi)
-        rotation();
-    else
+    /*
+     * fVDI never rotates text; the system's own VDI does.  The rotation
+     * checks fill y 10..390 around a string at y 200: they need a screen
+     * of 400 lines or more (work_out[1] is the last line).
+     */
+    if (fvdi)
         say("REALEXT fVDI present - rotation checks skipped");
+    else if (work_out[1] < 399)
+        say("REALEXT screen under 400 lines - rotation checks skipped");
+    else
+        rotation();
 
     /* A FreeType font, if there is one */
     /* no font list to walk without a GDOS (the system's own VDI) */
