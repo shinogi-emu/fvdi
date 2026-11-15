@@ -36,6 +36,12 @@
  *   face=NAME  the checks after the listing use the face named NAME (up
  *              to the end of the line), or else one whose name starts
  *              with it, instead of Liberation Sans; it must be listed
+ *   deep=NAME  the face named NAME (to the end of the line) has the
+ *              glyphs of B to J nested too deep for the VDI's font stack,
+ *              and the glyph of A not (a chain of composite glyphs that
+ *              the host tests' mkfonts makes): at 100 pixels A must be
+ *              drawn in it, B to J in the system font, as the engine
+ *              refuses them, and A in it again afterwards
  *
  * Every face draws "Abg" and, in the Atari set, "\x8e\x84\x9a" (A, a
  * and U with dieresis, built of two glyphs in some fonts), and is measured.
@@ -70,6 +76,7 @@ static short handle, scr_w, scr_h, planes, distinct, bg = FILL;
 static unsigned long p0, p1, pfill;     /* blank, text and background pixels */
 static short want_faces, lowmem;
 static char want_face[40];
+static char want_deep[40];
 
 /* what each face draws: A, a and U with dieresis are built of two glyphs in some fonts */
 #define FACE_TEXT "Abg\x8e\x84\x9a"
@@ -130,6 +137,14 @@ static void read_config(void)
         for (i = 0, p += 5; i < (short)sizeof(want_face) - 1 && *p && *p != '\r' && *p != '\n'; i++)
             want_face[i] = *p++;
         want_face[i] = 0;
+    }
+    if ((p = strstr(buf, "deep=")) != NULL)
+    {
+        short i;
+
+        for (i = 0, p += 5; i < (short)sizeof(want_deep) - 1 && *p && *p != '\r' && *p != '\n'; i++)
+            want_deep[i] = *p++;
+        want_deep[i] = 0;
     }
 }
 
@@ -1240,6 +1255,76 @@ static short take_memory(void **blocks, short max)
  * font, not left out.  If the engine still finds the memory, nothing can
  * be told, and that is said.
  */
+/*
+ * ===========================================================================
+ * Glyphs nested too deep for the font stack
+ * ===========================================================================
+ */
+
+/* the rows a string draws at 20,10 in a 400 x 160 box; 0 if none */
+static short drawn_rows(const char *s)
+{
+    Grab g;
+    short x0, y0, x1, y1, rows = 0;
+
+    fill(0, 0, 399, 159, 0);
+    text(20, 10, s, 2, 0, 0);
+    if (grab(&g, 0, 0, 400, 160))
+    {
+        if (changed_box(&g, p0, &x0, &y0, &x1, &y1))
+            rows = y1 - y0 + 1;
+        ungrab(&g);
+    }
+    return rows;
+}
+
+static void deep_check(short sysfonts, short fonts)
+{
+    static const char deep[] = "BCDEFGHIJ";
+    char name[40], line[200], one[2];
+    short i, id = 0, cw, ch, bw, bh, ha, va, rows, fallen = 0;
+
+    for (i = sysfonts + 1; i <= sysfonts + fonts && !id; i++)
+    {
+        short k = vqt_name(handle, i, name);
+
+        if (strncmp(name, want_deep, strlen(want_deep)) == 0)
+            id = k;
+    }
+    snprintf(line, sizeof(line), "the face with deeply nested glyphs ('%s') is listed and selected", want_deep);
+    check(id && vst_font(handle, id) == id, line);
+    if (!id)
+        return;
+
+    vst_height(handle, 100, &cw, &ch, &bw, &bh);
+    vst_alignment(handle, 0, 5, &ha, &va);
+    vst_color(handle, 1);
+    rows = drawn_rows("A");
+    snprintf(line, sizeof(line), "OUTLEDGE deep: 'A' draws %d rows at height 100", rows);
+    say(line);
+    check(rows > 50, "the glyph that is not nested too deep draws in the face");
+
+    one[1] = 0;
+    for (i = 0; deep[i]; i++)
+    {
+        one[0] = deep[i];
+        rows = drawn_rows(one);
+        snprintf(line, sizeof(line), "OUTLEDGE deep: '%c' draws %d rows", deep[i], rows);
+        say(line);
+        if (rows > 0 && rows <= 32)
+            fallen++;
+    }
+    snprintf(line, sizeof(line), "glyphs nested too deep are refused and drawn in the system font (%d of %d)",
+             fallen, (short)(sizeof(deep) - 1));
+    check(fallen == (short)(sizeof(deep) - 1), line);
+
+    rows = drawn_rows("A");
+    snprintf(line, sizeof(line), "OUTLEDGE deep: 'A' afterwards draws %d rows", rows);
+    say(line);
+    check(rows > 50, "the face draws again after the refusals (the engine is still on)");
+    vst_font(handle, 1);
+}
+
 static void fallback_check(void)
 {
     static const char *s = "MMMMMMMMMMMMMMMMMMMMMMMMMMMMMM";   /* 30, over 2000 px */
@@ -1391,6 +1476,11 @@ int main(void)
     vst_color(handle, 1);
 
     if (!fonts_check(sysfonts, &fonts) || lowmem)
+        goto done;
+
+    if (want_deep[0])
+        deep_check(sysfonts, fonts);
+    if (failed)
         goto done;
 
     id = pick_font(fonts, sysfonts, chosen);

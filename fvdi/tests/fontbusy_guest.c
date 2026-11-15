@@ -23,7 +23,10 @@
  * would interleave on the port).
  *
  * Font files load too fast on a host folder for the calls to meet: run it
- * with a VDI whose font file reads sleep a while (a test build).
+ * with a VDI whose font file reads sleep a while, such as EmuTOS built with
+ * DEF="-DVDI_TEST_SLOW_READ=200 -DVDI_TEST_SLOW_AFTER=60" (the reads of the
+ * boot's scan stay fast; leave VDI_TEST_SLOW_AFTER out, and delay=0, for
+ * the children to meet the desktop's scan too).
  *
  * Reports over BIOS device 1 (serial) and ends with
  * "FVDI FONTBUSY GUEST PASS" or "FVDI FONTBUSY FAIL: <check>".
