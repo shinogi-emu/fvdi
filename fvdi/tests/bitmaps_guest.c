@@ -364,10 +364,12 @@ int main(void)
     }
 
     /*
-     * Clipping off: a fill and a line that cross all four edges of a
-     * bitmap draw inside it only.  The 16 spare bytes each side of the
-     * pixels, and the pixels the line wrap would put them on, stay as
-     * they were.
+     * Clipping off: lines and fills that cross the edges of a bitmap draw
+     * inside it only.  The 16 spare bytes each side of the pixels stay as
+     * they were, and what the line wrap would put on the other side stays
+     * white: a line off the right edge would come back on the left of the
+     * next line.  The lines are at x = 61 and 3, which are not multiples
+     * of 8, and reach one line above and below.
      */
     memset(&bm, 0, sizeof(bm));
     bm.xmax = 64;
@@ -376,29 +378,40 @@ int main(void)
     check(h > 0, "v_open_bm handle (64x32, clipping off)");
     if (h > 0)
     {
-        short big[4] = { -40, -30, 200, 100 };
-        short pl[8] = { -10, 16, 90, 16, 32, -10, 32, 50 };
+        short top[4] = { 61, -1, 61, 5 }, bottom[4] = { 3, 27, 3, 32 };
+        short across[4] = { -10, 16, 90, 16 };
         long size = bm.width * bm.ymax;
-        int k, same = 1;
+        int k, same;
         short clipbox[4] = { 0, 0, 0, 0 };
 
         vs_clip(h, 0, clipbox);
         memset(bm.addr - 16, 0xa5, 16);
         memset(bm.addr + size, 0xa5, 16);
-        black_bar(h, 40, 10, 200, 12);
-        check(pixel_at(bm.addr, bm.width, 50, 11) == black_px, "the part inside is drawn");
-        check(pixel_at(bm.addr, bm.width, 5, 11) == white_px, "and does not wrap to the line's start");
-        check(pixel_at(bm.addr, bm.width, 5, 12) == white_px, "nor the line below's");
-        black_bar(h, big[0], big[1], big[2], big[3]);
-        check(pixel_at(bm.addr, bm.width, 20, 20) == black_px, "a bar over the whole bitmap fills it");
         vsl_color(h, 1);
         vswr_mode(h, 1);
-        v_pline(h, 2, pl);
-        v_pline(h, 2, pl + 4);
-        for (k = 0; k < 16; k++)
+        v_pline(h, 2, top);
+        v_pline(h, 2, bottom);
+        v_pline(h, 2, across);
+        check(pixel_at(bm.addr, bm.width, 61, 2) == black_px &&
+              pixel_at(bm.addr, bm.width, 3, 30) == black_px &&
+              pixel_at(bm.addr, bm.width, 30, 16) == black_px, "the parts of the lines inside are drawn");
+        check(pixel_at(bm.addr, bm.width, 60, 15) == white_px &&
+              pixel_at(bm.addr, bm.width, 5, 17) == white_px, "a line off the edge does not wrap to the other side");
+        for (k = 0, same = 1; k < 16; k++)
             if (bm.addr[-16 + k] != 0xa5 || bm.addr[size + k] != 0xa5)
                 same = 0;
-        check(same, "nothing written in the spare bytes either side");
+        check(same, "lines leave the spare bytes either side alone");
+
+        black_bar(h, 40, 10, 200, 12);
+        check(pixel_at(bm.addr, bm.width, 50, 11) == black_px, "the part of a bar inside is drawn");
+        check(pixel_at(bm.addr, bm.width, 5, 11) == white_px &&
+              pixel_at(bm.addr, bm.width, 5, 12) == white_px, "and does not wrap to the line's start");
+        black_bar(h, -40, -1, 200, 32);
+        check(pixel_at(bm.addr, bm.width, 20, 20) == black_px, "a bar over the whole bitmap fills it");
+        for (k = 0, same = 1; k < 16; k++)
+            if (bm.addr[-16 + k] != 0xa5 || bm.addr[size + k] != 0xa5)
+                same = 0;
+        check(same, "bars leave the spare bytes either side alone");
         vq_extnd(h, 1, work_out);
         check(work_out[19] == 0, "and vq_extnd still says clipping is off");
         v_clsbm(h);
