@@ -97,6 +97,9 @@ static unsigned short pixel_at(const unsigned char *base, long wrap, short x, sh
     return v;
 }
 
+/* the same: fVDI is the VDI, and shares the stale-contrl[5] exposure */
+#define jar_has_fvdi_user() ((short)Supexec(jar_has_fvdi))
+
 /* is there an 'fVDI' cookie (the jar is in supervisor memory)? */
 static long jar_has_fvdi(void)
 {
@@ -133,12 +136,61 @@ static unsigned char *aligned(unsigned char *raw)
     return (unsigned char *)((((unsigned long)raw) + 16 + 15) & ~15UL);
 }
 
+/* the word "MiW" in black, its top left at (x,y) */
+static void draw_text(short h, short x, short y)
+{
+    short d;
+
+    vswr_mode(h, 1);
+    vst_color(h, 1);
+    vst_alignment(h, 0, 5, &d, &d);
+    v_gtext(h, x, y, "MiW");
+}
+
+/* black pixels in the box of w x ht at (x,y) */
+static long black_in(const unsigned char *base, long wrap, short x, short y, short w, short ht)
+{
+    long n = 0;
+    short i, j;
+
+    for (j = 0; j < ht; j++)
+        for (i = 0; i < w; i++)
+            if (pixel_at(base, wrap, x + i, y + j) == black_px)
+                n++;
+    return n;
+}
+
+/* are the two boxes of w x ht pixels the same? */
+static int same_box(const unsigned char *b1, long wrap1, short x1, short y1,
+                    const unsigned char *b2, long wrap2, short x2, short y2, short w, short ht)
+{
+    short i, j;
+
+    for (j = 0; j < ht; j++)
+        for (i = 0; i < w; i++)
+            if (pixel_at(b1, wrap1, x1 + i, y1 + j) != pixel_at(b2, wrap2, x2 + i, y2 + j))
+                return 0;
+    return 1;
+}
+
+/* is every pixel of the box white? */
+static int white_box_at(const unsigned char *base, long wrap, short x, short y, short w, short ht)
+{
+    short i, j;
+
+    for (j = 0; j < ht; j++)
+        for (i = 0; i < w; i++)
+            if (pixel_at(base, wrap, x + i, y + j) != white_px)
+                return 0;
+    return 1;
+}
+
 int main(void)
 {
-    static unsigned char raw1[256 * 60 + 64], raw2[512 * 90 + 64];
-    unsigned char *mem1 = aligned(raw1), *mem2 = aligned(raw2);
+    static unsigned char raw1[256 * 60 + 64], raw2[512 * 90 + 64], raw3[160 * 24 + 64];
+    unsigned char *mem1 = aligned(raw1), *mem2 = aligned(raw2), *mem3 = aligned(raw3);
     char line[200];
-    short cw, ch, bw, bh, h, h2, white, black;
+    short cw, ch, bw, bh, h, h2, white, black, aes_handle, scr_w, scr_h;
     long space;
     unsigned long px_format;
     GCBITMAP bm;
@@ -147,10 +199,13 @@ int main(void)
     say("BITMAPS start");
     check(appl_init() >= 0, "AES application registration");
     screen = graf_handle(&cw, &ch, &bw, &bh);
+    aes_handle = screen;
     v_opnvwk(work_in, &screen, work_out);
     check(screen > 0, "virtual workstation");
     if (failed)
         goto out;
+    scr_w = work_out[0] + 1;
+    scr_h = work_out[1] + 1;
     vq_extnd(screen, 1, work_out);
     snprintf(line, sizeof(line), "BITMAPS screen planes %d", work_out[4]);
     say(line);
@@ -417,6 +472,222 @@ int main(void)
         v_clsbm(h);
     }
 
+
+    /*
+     * A program built with the DRI binding leaves contrl[5] as an earlier
+     * call set it (v_exit_cur sets 2, v_enter_cur 3) when it calls
+     * v_opnvwk: it has 11 intin, and must get a workstation of the screen
+     * with a new handle, not a bitmap call (v_resize_bm and v_open_bm have
+     * 6 and 4 intin).  contrl[7..8] still holds a pointer from a call
+     * before.  Checked through drawing: a bar through the new handle
+     * shows on the screen.
+     */
+    if (jar_has_fvdi_user())
+        say("BITMAPS stale contrl[5]: skipped (fVDI has the same exposure)");
+    else
+    {
+        static short rc[12], rin[11], rout[57], rpts[2], rptso[12];
+        VDIPB pb;
+        short sub, nh, p0, p1;
+        short px[4] = { 0, 0, 3, 3 };
+
+        pb.control = rc;
+        pb.intin = rin;
+        pb.ptsin = rpts;
+        pb.intout = rout;
+        pb.ptsout = rptso;
+        wind_update(BEG_UPDATE);
+        graf_mouse(M_OFF, 0);
+        for (sub = 2; sub <= 3; sub++)
+        {
+            memset(rc, 0, sizeof(rc));
+            memcpy(rin, work_in, sizeof(work_in));
+            memset(&bm, 0, sizeof(bm));
+            rc[0] = 100;
+            rc[3] = 11;
+            rc[5] = sub;
+            rc[6] = aes_handle;
+            rc[7] = (short)(((unsigned long)&bm) >> 16);
+            rc[8] = (short)(((unsigned long)&bm) & 0xffff);
+            vdi(&pb);
+            nh = rc[6];
+            snprintf(line, sizeof(line), "v_opnvwk with a stale contrl[5] = %d gets a new handle", sub);
+            check(nh > 0 && nh != aes_handle && nh != screen, line);
+            if (nh <= 0)
+                continue;
+            snprintf(line, sizeof(line), "and a workstation of the screen's size (stale %d)", sub);
+            check(rout[0] + 1 == scr_w && rout[1] + 1 == scr_h, line);
+            vswr_mode(nh, 1);
+            vsf_interior(nh, 1);
+            vsf_perimeter(nh, 0);
+            vsf_color(nh, 0);
+            v_bar(nh, px);
+            p0 = pel_at(screen, 1, 1);
+            vsf_color(nh, 1);
+            v_bar(nh, px);
+            p1 = pel_at(screen, 1, 1);
+            vsf_color(nh, 0);
+            v_bar(nh, px);
+            snprintf(line, sizeof(line), "it draws on the screen, not in a bitmap (stale %d)", sub);
+            check(p0 != p1, line);
+            v_clsvwk(nh);
+        }
+        graf_mouse(M_ON, 0);
+        wind_update(END_UPDATE);
+    }
+
+    /*
+     * A bitmap larger than the screen (64 more pixels each way), drawn in
+     * past the screen's edges and past the first 32 KB of its memory: a
+     * bar, lines and text.  The screen's size must not limit it, and no
+     * offset in it may be a 16-bit number.
+     */
+    {
+        short bw2 = (short)((scr_w + 64 + 15) & ~15), bh2 = scr_h + 64;
+        short tw = 36, th = 16, tx, ty = scr_h + 24;
+        short big;
+        short xy[4];
+        long cnt;
+
+        tx = scr_w - 12;
+        memset(&bm, 0, sizeof(bm));
+        bm.xmax = bw2;
+        bm.ymax = bh2;
+        big = v_open_bm(screen, &bm, 1, 0, 0, 0);
+        snprintf(line, sizeof(line), "v_open_bm handle (%dx%d, larger than the screen)", bw2, bh2);
+        check(big > 0, line);
+        if (big > 0)
+        {
+            check(pixel_at(bm.addr, bm.width, bw2 - 1, bh2 - 1) == white_px &&
+                  pixel_at(bm.addr, bm.width, scr_w + 10, scr_h + 8) == white_px, "it starts white, to its last pixel");
+            check((long)(scr_h + 24) * bm.width > 32767L, "the rows drawn in are past byte 32767");
+
+            /* a reference of the text in a small bitmap, at the same phase */
+            {
+                GCBITMAP ref;
+                short rh;
+
+                memset(&ref, 0, sizeof(ref));
+                ref.xmax = 80;
+                ref.ymax = 24;
+                rh = v_open_bm(screen, &ref, 1, 0, 0, 0);
+                check(rh > 0, "v_open_bm handle (80x24, the text for comparison)");
+                if (rh <= 0)
+                {
+                    v_clsbm(big);
+                    goto many;
+                }
+                draw_text(rh, (tx & 15) + 16, 4);
+                cnt = black_in(ref.addr, ref.width, (tx & 15) + 16, 4, tw, th);
+                check(cnt > 0, "the text of the small bitmap has pixels");
+
+                /* bar, past the corner of the screen */
+                black_bar(big, scr_w + 4, scr_h + 4, scr_w + 19, scr_h + 11);
+                check(pixel_at(bm.addr, bm.width, scr_w + 10, scr_h + 8) == black_px, "bar past the screen's corner");
+                check(pixel_at(bm.addr, bm.width, scr_w + 3, scr_h + 8) == white_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 20, scr_h + 8) == white_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 10, scr_h + 3) == white_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 10, scr_h + 12) == white_px, "and only there");
+
+                /* lines: horizontal, vertical, slanted */
+                vsl_color(big, 1);
+                vswr_mode(big, 1);
+                vsl_type(big, 1);
+                vsl_width(big, 1);
+                xy[0] = scr_w + 4;
+                xy[1] = scr_h + 16;
+                xy[2] = scr_w + 50;
+                xy[3] = scr_h + 16;
+                v_pline(big, 2, xy);
+                xy[0] = scr_w + 58;
+                xy[1] = scr_h + 2;
+                xy[2] = scr_w + 58;
+                xy[3] = scr_h + 60;
+                v_pline(big, 2, xy);
+                xy[0] = scr_w + 4;
+                xy[1] = scr_h + 50;
+                xy[2] = scr_w + 50;
+                xy[3] = scr_h + 62;
+                v_pline(big, 2, xy);
+                check(pixel_at(bm.addr, bm.width, scr_w + 4, scr_h + 16) == black_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 27, scr_h + 16) == black_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 50, scr_h + 16) == black_px, "a horizontal line past the edge");
+                check(pixel_at(bm.addr, bm.width, scr_w + 27, scr_h + 15) == white_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 27, scr_h + 17) == white_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 51, scr_h + 16) == white_px, "and only there");
+                check(pixel_at(bm.addr, bm.width, scr_w + 58, scr_h + 2) == black_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 58, scr_h + 31) == black_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 58, scr_h + 60) == black_px, "a vertical line past the edge");
+                check(pixel_at(bm.addr, bm.width, scr_w + 57, scr_h + 31) == white_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 59, scr_h + 31) == white_px, "and only there");
+                check(pixel_at(bm.addr, bm.width, scr_w + 4, scr_h + 50) == black_px &&
+                      pixel_at(bm.addr, bm.width, scr_w + 50, scr_h + 62) == black_px, "a slanted line past the edge");
+
+                /* text across the screen's right edge */
+                draw_text(big, tx, ty);
+                cnt = black_in(bm.addr, bm.width, tx, ty, tw, th);
+                check(cnt > 0, "text across the screen's edge has pixels");
+                check(black_in(bm.addr, bm.width, scr_w, ty, 16, th) > 0, "some of them past the edge");
+                check(same_box(bm.addr, bm.width, tx, ty, ref.addr, ref.width, (tx & 15) + 16, 4, tw, th),
+                      "and they are those of the same text in a small bitmap");
+                check(white_box_at(bm.addr, bm.width, 0, ty, 16, th), "nothing came back at the line's start");
+                v_clsbm(rh);
+            }
+            v_clsbm(big);
+        }
+    }
+
+    /*
+     * Text in a bitmap in the caller's memory, whose lines are as wide as
+     * the pixels need (10 words a plane: 2 mod 4 bytes with one plane): the
+     * same pixels as in a bitmap of the VDI's.  The planes of a screen of
+     * interleaved planes take the same path as a 16-bit screen does here.
+     */
+    {
+        GCBITMAP ref, cm;
+        short rh, ch2;
+        long pitch = 10L * planes;
+        long size = pitch * 24;
+        int same, k;
+
+        memset(&ref, 0, sizeof(ref));
+        ref.xmax = 80;
+        ref.ymax = 24;
+        rh = v_open_bm(screen, &ref, 1, 0, 0, 0);
+        memset(mem3 - 16, 0xa5, 16);
+        memset(mem3, white_byte, size);
+        memset(mem3 + size, 0xa5, 16);
+        memset(&cm, 0, sizeof(cm));
+        cm.addr = mem3;
+        cm.width = pitch;
+        cm.xmax = 80;
+        cm.ymax = 24;
+        ch2 = v_open_bm(screen, &cm, 1, 0, 0, 0);
+        check(rh > 0 && ch2 > 0, "two bitmaps for text, the VDI's and the caller's");
+        if (rh > 0 && ch2 > 0)
+        {
+            short xs[3] = { 3, 16, 29 };
+
+            for (k = 0; k < 3; k++)
+            {
+                draw_text(rh, xs[k], 4);
+                draw_text(ch2, xs[k], 4);
+            }
+            check(black_in(mem3, pitch, 0, 0, 80, 24) > 0, "text in the caller's memory has pixels");
+            check(same_box(mem3, pitch, 0, 0, ref.addr, ref.width, 0, 0, 80, 24),
+                  "the same pixels as in the VDI's memory");
+            for (k = 0, same = 1; k < 16; k++)
+                if (mem3[-16 + k] != 0xa5 || mem3[size + k] != 0xa5)
+                    same = 0;
+            check(same, "text leaves the bytes either side of the caller's memory alone");
+        }
+        if (rh > 0)
+            v_clsbm(rh);
+        if (ch2 > 0)
+            v_clsbm(ch2);
+    }
+
+many:
     /* Many opens and closes: nothing left behind to trip over */
     for (h2 = 0; h2 < 40; h2++)
     {
