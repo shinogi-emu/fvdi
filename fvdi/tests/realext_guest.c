@@ -125,7 +125,8 @@ int main(void)
     vst_effects(h, 0);
 
     /* A FreeType font, if there is one */
-    fonts = vst_load_fonts(h, 0);
+    /* no font list to walk without a GDOS (the system's own VDI) */
+    fonts = (short)vq_vgdos() != -2 ? vst_load_fonts(h, 0) : 0;
     id = 0;
     for (i = 2; i <= fonts + 1 && !id; i++)
     {
