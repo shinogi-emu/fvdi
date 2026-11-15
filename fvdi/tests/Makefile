@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -37,6 +37,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) bmrgb_guest.c -lgem -o $(TEST_BUILD)/BMRGB.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) xfer_guest.c -lgem -o $(TEST_BUILD)/XFER.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) fontbusy_guest.c -lgem -o $(TEST_BUILD)/FONTBUSY.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
@@ -159,6 +160,15 @@ check-outledge-log:
 	if grep -Fq 'TWICE run 1' "$(GUEST_LOG)"; then \
 		test "$$(grep -c 'FVDI OUTLEDGE GUEST PASS' "$(GUEST_LOG)")" -eq 2 && \
 		grep -Fq 'FVDI TWICE GUEST PASS' "$(GUEST_LOG)"; fi
+
+# FONTBUSY.PRG: two programs at once (under MiNT) size outline faces while
+# the other keeps the font engine busy; both must keep every face.  See
+# the top of fontbusy_guest.c.
+check-fontbusy-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI FONTBUSY FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI FONTBUSY GUEST PASS' "$(GUEST_LOG)"
+	test "$$(grep -c 'FVDI FONTBUSY CHILD PASS' "$(GUEST_LOG)")" -eq 2
 
 # EDGES.PRG: v_cellarray and v_contourfill return, vq_chcells fits the
 # screen, v_curleft moves one column left.
