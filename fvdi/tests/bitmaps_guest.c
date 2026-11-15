@@ -187,11 +187,11 @@ static int white_box_at(const unsigned char *base, long wrap, short x, short y, 
 
 int main(void)
 {
-    static unsigned char raw1[256 * 60 + 64], raw2[512 * 90 + 64], raw3[160 * 24 + 64];
+    static unsigned char raw1[256 * 60 + 64], raw2[512 * 90 + 64], raw3[170 * 24 + 64];
     unsigned char *mem1 = aligned(raw1), *mem2 = aligned(raw2), *mem3 = aligned(raw3);
     char line[200];
     short cw, ch, bw, bh, h, h2, white, black, aes_handle, scr_w, scr_h;
-    long space;
+    long space, free0;
     unsigned long px_format;
     GCBITMAP bm;
     MFDB mfdb;
@@ -639,14 +639,15 @@ int main(void)
 
     /*
      * Text in a bitmap in the caller's memory, whose lines are as wide as
-     * the pixels need (10 words a plane: 2 mod 4 bytes with one plane): the
+     * the pixels need (5 words a plane, and one more word when that would be a
+     * multiple of 4 bytes, so the lines are 2 mod 4 bytes on every screen): the
      * same pixels as in a bitmap of the VDI's.  The planes of a screen of
      * interleaved planes take the same path as a 16-bit screen does here.
      */
     {
         GCBITMAP ref, cm;
         short rh, ch2;
-        long pitch = 10L * planes;
+        long pitch = 10L * planes + (((10L * planes) % 4 == 0) ? 2 : 0);
         long size = pitch * 24;
         int same, k;
 
@@ -689,6 +690,7 @@ int main(void)
 
 many:
     /* Many opens and closes: nothing left behind to trip over */
+    free0 = (long)Malloc(-1L);
     for (h2 = 0; h2 < 40; h2++)
     {
         memset(&bm, 0, sizeof(bm));
@@ -702,6 +704,9 @@ many:
         v_clsbm(h);
     }
     check(h2 == 40, "40 opens, resizes and closes");
+    snprintf(line, sizeof(line), "BITMAPS free memory %ld before, %ld after", free0, (long)Malloc(-1L));
+    say(line);
+    check((long)Malloc(-1L) == free0, "and they leave no memory taken");
 
 out:
     if (screen > 0)
