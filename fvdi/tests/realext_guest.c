@@ -133,7 +133,7 @@ static void alignments(const char *label)
  * rotation the box ends at the far end of the text (its corners are one
  * past the last column), and covers both lines of the cells.
  */
-static short pen_pixel;
+static short pen_pixel, planes;
 
 static short pixel_at(short x, short y)
 {
@@ -143,7 +143,7 @@ static short pixel_at(short x, short y)
     return idx;
 }
 
-static void rotation_one(short angle, short hor, short ver)
+static void rotation_one(short angle, short hor, short ver, short effects)
 {
     static const char *text = "Hamburgefonts";
     const short px = 160, py = 200;
@@ -151,15 +151,26 @@ static void rotation_one(short angle, short hor, short ver)
     short minx, maxx, miny, maxy, ok, top_ok, bottom_ok, left_ok, right_ok;
     char what[120];
 
+    /*
+     * the 16-bit text path clears the skew's extra columns across x whatever
+     * the rotation, so rotated skewed text there covers more than its cells:
+     * not checked in true colour
+     */
+    if (angle && (effects & 4) && planes >= 16)
+    {
+        say("REALEXT rotation with skew skipped in true colour");
+        return;
+    }
     vst_alignment(handle, hor, ver, &h, &v);
     vst_rotation(handle, angle);
+    vst_effects(handle, effects);
     vswr_mode(handle, 1);
     vsf_interior(handle, 1);
     vsf_color(handle, 1);
     vsf_perimeter(handle, 0);
-    xy[0] = 20; xy[1] = 80; xy[2] = 300; xy[3] = 320;
+    xy[0] = 4; xy[1] = 10; xy[2] = 316; xy[3] = 390;
     vr_recfl(handle, xy);
-    pen_pixel = pixel_at(22, 82);
+    pen_pixel = pixel_at(6, 12);
     vst_color(handle, 1);
     memset(real, 0x55, sizeof(real));
     vqt_real_extent(handle, px, py, text, real);
@@ -207,16 +218,17 @@ static void rotation_one(short angle, short hor, short ver)
     {
         char line[200];
 
-        snprintf(line, sizeof(line), "REALEXT rotation %d align %d,%d: corners %d,%d %d,%d %d,%d %d,%d; box %d,%d-%d,%d",
-                 angle, hor, ver, real[0], real[1], real[2], real[3], real[4], real[5], real[6], real[7],
+        snprintf(line, sizeof(line), "REALEXT rotation %d effects %d align %d,%d: corners %d,%d %d,%d %d,%d %d,%d; box %d,%d-%d,%d",
+                 angle, effects, hor, ver, real[0], real[1], real[2], real[3], real[4], real[5], real[6], real[7],
                  minx, miny, maxx, maxy);
         say(line);
     }
-    snprintf(what, sizeof(what), "rotation %d align %d,%d: nothing drawn outside the box", angle, hor, ver);
+    snprintf(what, sizeof(what), "rotation %d effects %d align %d,%d: nothing drawn outside the box", angle, effects, hor, ver);
     check(ok, what);
-    snprintf(what, sizeof(what), "rotation %d align %d,%d: drawing on every edge of the box", angle, hor, ver);
+    snprintf(what, sizeof(what), "rotation %d effects %d align %d,%d: drawing on every edge of the box", angle, effects, hor, ver);
     check(top_ok && bottom_ok && left_ok && right_ok, what);
     vst_rotation(handle, 0);
+    vst_effects(handle, 0);
     vst_alignment(handle, 0, 0, &dummy, &dummy);
 }
 
@@ -227,13 +239,19 @@ static void rotation(void)
 
     vst_font(handle, 1);
     vst_effects(handle, 0);
-    rotation_one(0, 0, 0);          /* the unrotated box, the same way */
+    rotation_one(0, 0, 0, 0);          /* the unrotated box, the same way */
     for (a = 0; a < 3; a++)
     {
-        rotation_one(angles[a], 0, 0);
-        rotation_one(angles[a], 1, 5);
-        rotation_one(angles[a], 2, 3);
-        rotation_one(angles[a], 0, 2);
+        rotation_one(angles[a], 0, 0, 0);
+        rotation_one(angles[a], 1, 5, 0);
+        rotation_one(angles[a], 2, 3, 0);
+        rotation_one(angles[a], 0, 2, 0);
+        rotation_one(angles[a], 0, 0, 4);       /* skew */
+        rotation_one(angles[a], 1, 5, 4);
+        rotation_one(angles[a], 2, 2, 4);
+        rotation_one(angles[a], 0, 3, 16);      /* outline */
+        rotation_one(angles[a], 1, 0, 16);
+        rotation_one(angles[a], 2, 5, 4 | 16);  /* both */
     }
 }
 
@@ -253,6 +271,12 @@ int main(void)
     if (failed)
         goto out;
     h = handle;
+    {
+        short ext[57];
+
+        vq_extnd(handle, 1, ext);
+        planes = ext[4];
+    }
     Supexec(jar_walk);
     fvdi = (short) cookie_found;
     /* without fVDI or a GDOS the system's own VDI has no 240 sub 0 */
@@ -318,7 +342,7 @@ int main(void)
         check(file[0] == 0, "no driver file name");
         check(path[0] == 0, "no driver folder");
     }
-    check(strlen(name) > 0 && strlen(name) <= 31, "driver name");
+    check(fvdi ? (strlen(name) > 0 && strlen(name) <= 31) : !strcmp(name, "EmuTOS VDI"), "driver name");
     exists = 1;
     open = vq_ext_devinfo(h, 9, &exists, path, file, name);
     check(exists == 0 && open == 0, "no driver for device 9");
