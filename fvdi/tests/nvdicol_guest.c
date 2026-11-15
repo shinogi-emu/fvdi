@@ -411,19 +411,40 @@ int main(void)
     vqm_attributes(handle, attrib);
     check(attrib[1] >= 0 && attrib[1] < 256 && attrib[1] < numcolors, "vqm_attributes after an RGB marker colour is a pen");
 
-    /* a second workstation draws its own colours: the first's are not its */
+    /*
+     * a second workstation draws its own colours: A has an RGB fill colour,
+     * B another; one call on A, then B draws, and B must draw its own
+     * (the colours are per workstation, and the drawing code must read the
+     * workstation of the call, not that of the call before)
+     */
     {
         short h2 = open_vwk(), keep = handle;
+        unsigned bval;
+        Count n;
 
         check(h2 > 0 && h2 != keep, "second virtual workstation");
         handle = h2;
         white_area(x0, y0);
         vsf_interior(handle, 1);
-        vsf_color(handle, 1);
+        check(set_rgb(200, 1, paper) == 1, "second workstation: vsf_fg_color accepted");
+        bval = (unsigned)color2value(paper);
+        handle = keep;
+        check(set_rgb(200, 1, ink) == 1, "first workstation: vsf_fg_color again");
+        vsl_width(keep, 1);                     /* the call before B draws is A's */
+        handle = h2;
         xy[0] = x0 + 8;
         xy[1] = y0 + 8;
         xy[2] = x0 + AW - 9;
         xy[3] = y0 + AH - 9;
+        vr_recfl(handle, xy);
+        grab(x0, y0);
+        n = count(8, 8, AW - 9, AH - 9, bval, 0xdead, white);
+        snprintf(what, sizeof(what), "NVDICOL second workstation: %04x drawn %ld of %ld times, other %ld (first %04x)",
+                 bval, n.fg, (long)(AW - 16) * (AH - 16), n.other, n.first_other);
+        say(what);
+        check(n.fg == (long)(AW - 16) * (AH - 16), "a workstation draws its own RGB colour after a call on another");
+        /* and a pen on it */
+        vsf_color(handle, 1);
         vr_recfl(handle, xy);
         grab(x0, y0);
         check(box_is_pen(1, x0, y0, AW / 2, AH / 2), "a workstation without RGB colours draws its own pens");
