@@ -561,6 +561,10 @@ static void test_limits(void)
     vdi_raw(screen, 11, 13, 0, 0);
     bez_call(6, 0, p, flags, 4, -1);
     check(contrl[4] == 0, "after v_bez_off it is v_pline again");
+
+    /* contrl[3] of 16384 words or more: still only the flags of the points are read */
+    bez_call(6, 13, p, flags, 4, 20000);
+    check(contrl[4] == 6 && intout[0] == n1, "contrl[3] = 20000: the curve, its flags read");
 }
 
 static void test_clip_quality(void)

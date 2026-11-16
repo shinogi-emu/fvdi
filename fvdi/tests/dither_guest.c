@@ -652,6 +652,50 @@ static void test_16bit(void)
     check(!memcmp(a, b, sizeof(a)), "onto 16 bits mode 128 draws what mode 0 draws");
 }
 
+/*
+ * The old path (planes or 16 bits, no bit 7) takes a table only for its
+ * count of 1-256 colours, else the pens: a count out of range draws as no
+ * table at all
+ */
+static void test_bad_count_old_path(void)
+{
+    static CTab bad;
+    static unsigned char s8[4] = { 0, 1, 2, 3 };
+    static unsigned short a[2 * 8 * 4], b[2 * 8 * 4];
+    GCBITMAP src = bitmap(s8, 2, 2, 8, F_8), da, db;
+    short sr[4] = { 0, 0, 1, 1 }, dr[4] = { 0, 0, 3, 3 };
+    static const long counts[4] = { 0, 257, 0x10000L, -5 };
+    int c, k, drew;
+
+    memset(&da, 0, sizeof(da));
+    da.magic = 0x6362746dL;
+    da.length = sizeof(da);
+    da.addr = (unsigned char *)a;
+    da.width = planes == 16 ? 32 : 2L * planes;
+    da.bits = planes;
+    da.px_format = fmt_screen;
+    da.xmax = 16;
+    da.ymax = 4;
+    db = da;
+    db.addr = (unsigned char *)b;
+    palette(&bad, 4);
+    for (c = 0; c < 4; c++)
+    {
+        bad.no_colors = counts[c];
+        memset(a, 0xa7, sizeof(a));
+        memset(b, 0xa7, sizeof(b));
+        src.ctab = NULL;
+        transfer(screen, &src, &db, sr, dr, 0);
+        src.ctab = &bad;
+        transfer(screen, &src, &da, sr, dr, 0);
+        for (k = 0, drew = 0; k < (int)(sizeof(b) / 2); k++)
+            if (b[k] != 0xa7a7)
+                drew = 1;
+        check(!memcmp(a, b, sizeof(a)) && drew,
+              "a table of a count out of range draws as the pens (the old path)");
+    }
+}
+
 /* (g) */
 static void test_refusals(void)
 {
@@ -712,7 +756,25 @@ static void test_refusals(void)
     transfer(screen, &src2, &d2, sr, dr, 128);
     check(!memcmp(d, keep, sizeof(d)), "refused: a source table without the magic");
     pal.magic ^= 1;
+
+    /* a source table whose count is out of range: refused by the index path */
+    {
+        static const long counts[5] = { 0, -1, 257, 0x10000L, 0x7fffffffL };
+        int c;
+
+        for (c = 0; c < 5; c++)
+        {
+            pal.no_colors = counts[c];
+            pal.length = 48 + 8 * 256;
+            transfer(screen, &src2, &d2, sr, dr, 128);
+            transfer(screen, &src2, &d2, sr, dr, 0);
+            check(!memcmp(d, keep, sizeof(d)), "refused: a source table of a count out of range (8-bit indices)");
+        }
+        pal.no_colors = 4;
+        pal.length = 48 + 8 * 4;
+    }
     delete_itab(screen, id);
+    test_bad_count_old_path();
 }
 
 int main(void)

@@ -280,6 +280,18 @@ static unsigned long drawn_pixel(short pen)
 
 static CTab saved, table, dflt, other;
 
+/* TRUE under MiNT (the cookie jar has 'MiNT') */
+static long mint_cookie(void)
+{
+    long *jar = *(long **)0x5a0;
+
+    if (jar)
+        for (; jar[0]; jar += 2)
+            if (jar[0] == 0x4d694e54L)
+                return 1;
+    return 0;
+}
+
 /* (a), (b) */
 static void test_query(void)
 {
@@ -439,7 +451,7 @@ static void test_default(void)
 static void test_create(void)
 {
     static const short depths[8] = { 1, 2, 4, 8, 15, 16, 24, 32 };
-    long a = get_ctab_id(screen), b = get_ctab_id(screen);
+    long a = get_ctab_id(screen), b = get_ctab_id(screen), on_mint = Supexec(mint_cookie);
     CTab *t, *u;
     char text[120];
     int i;
@@ -463,11 +475,30 @@ static void test_create(void)
         t->colors[1].red = 0x1234;
         t->colors[n - 1].blue = 0x4321;
         check(t->colors[1].red == 0x1234 && t->colors[n - 1].blue == 0x4321, "the program writes the table");
+        /*
+         * The table is a block of its own: EmuTOS's Mshrink to its own size
+         * succeeds only on the start of a block and changes nothing (MiNT
+         * refuses blocks the program does not own: not asked there)
+         */
+        if (!on_mint)
+            check(Mshrink(t, t->length) == 0, "the table starts a block of its own");
         u = create_ctab(screen, 1, depths[i]);
         check(u != NULL && u != t && u->map_id != t->map_id, "a second one is another table");
-        check(delete_ctab(screen, t) == 1, "v_delete_ctab");
-        check(delete_ctab(screen, t) == 0, "a second v_delete_ctab is refused");
-        check(u && delete_ctab(screen, u) == 1, "v_delete_ctab of the second");
+        if (u)
+        {
+            long k;
+            int intact = 1;
+
+            /* the program may write all of its table: the VDI keeps nothing of its own there */
+            memset(u, 0x5a, u->length);
+            check(delete_ctab(screen, t) == 1, "v_delete_ctab");
+            for (k = 0; k < 48 + 8 * n; k++)
+                if (((unsigned char *)u)[k] != 0x5a)
+                    intact = 0;
+            check(intact, "deleting a table leaves the other table's bytes alone");
+            check(delete_ctab(screen, t) == 0, "a second v_delete_ctab is refused");
+            check(delete_ctab(screen, u) == 1, "v_delete_ctab of a table the program overwrote");
+        }
     }
     check(create_ctab(screen, 2, 8) == NULL, "v_create_ctab refuses colour space 2");
     check(create_ctab(screen, 1, 3) == NULL, "v_create_ctab refuses 3 bits");
@@ -560,7 +591,13 @@ static void test_lifecycle(void)
             return;
         }
         for (i = 0; i < 3; i++)
-            create_ctab(h, 1, i == 0 ? 8 : i == 1 ? 4 : 32);
+        {
+            CTab *m = create_ctab(h, 1, i == 0 ? 8 : i == 1 ? 4 : 32);
+
+            /* the program writes all of it, header too, before the close frees it */
+            if (m)
+                memset(m, 0xff, m->length);
+        }
         create_itab(h, &pal, 3);
         create_itab(h, &pal, 4);
         create_itab(h, &pal, 5);
