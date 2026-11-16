@@ -110,13 +110,29 @@ int main(void)
     check(n == 0, "no outline from the bitmap system font");
 
     fonts = vst_load_fonts(h, 0);
+    /* Which outline font is first depends on the order of the font folder,
+     * and a script face such as Dancing Script draws its O as one stroke
+     * with no counter.  The checks below are about an O with a hole, so
+     * take the first outline font that has one, whatever the order. */
     for (id = 0, i = 2; i <= fonts + 1 && !id; i++)
     {
         short fid = vqt_name(h, i, fname);
+
         if (fid >= 5000)
-            id = fid;
+        {
+            short k, cnt = 0;
+
+            vst_font(h, fid);
+            vst_point(h, 48, &cw, &ch, &bw, &bh);
+            v_getoutline(h, 'O', xy, bez, MAXPTS, &n);
+            for (k = 0; k < n; k++)
+                if (bez[k] & 2)
+                    cnt++;
+            if (cnt == 2)
+                id = fid;
+        }
     }
-    check(id != 0, "an outline font is loaded");
+    check(id != 0, "an outline font with a counter in its O is loaded");
     if (failed)
         goto out;
     snprintf(line, sizeof(line), "OUTLINE font %d '%s'", id, fname);
@@ -125,13 +141,15 @@ int main(void)
     vst_point(h, 48, &cw, &ch, &bw, &bh);
 
     /* vst_width: as NVDI, an outline font takes the character width alone;
-     * the height stays and the cell narrows with the characters */
+     * the height stays and the cell narrows with the characters (in the
+     * same proportion: a symbol face has a cell narrower than its
+     * character width, so the cell is not compared with it) */
     w2 = h2 = cw2 = ch2 = -1;
     vst_width(h, cw / 2, &w2, &h2, &cw2, &ch2);
     snprintf(line, sizeof(line), "OUTLINE vst_width %d -> %d %d %d %d (point gave %d %d %d %d)",
              cw / 2, w2, h2, cw2, ch2, cw, ch, bw, bh);
     say(line);
-    check(w2 == cw / 2 && h2 == ch && ch2 == bh && cw2 >= w2 && cw2 < bw,
+    check(w2 == cw / 2 && h2 == ch && ch2 == bh && cw2 < bw && 2 * cw2 >= bw - 2 && 2 * cw2 <= bw + 2,
           "vst_width sets the character width alone");
 
     /* The form of the outline */
