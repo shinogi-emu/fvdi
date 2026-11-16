@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log check-ctab-log check-dither-log check-bezier-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -36,6 +36,9 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) scrninfo_guest.c -lgem -o $(TEST_BUILD)/SCRNINFO.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) bmrgb_guest.c -lgem -o $(TEST_BUILD)/BMRGB.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) xfer_guest.c -lgem -o $(TEST_BUILD)/XFER.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) ctab_guest.c -lgem -o $(TEST_BUILD)/CTAB.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) dither_guest.c -lgem -o $(TEST_BUILD)/DITHER.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) bezier_guest.c -lgem -o $(TEST_BUILD)/BEZIER.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) fontbusy_guest.c -lgem -o $(TEST_BUILD)/FONTBUSY.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
@@ -207,3 +210,28 @@ check-xfer-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI XFER FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI XFER GUEST PASS' "$(GUEST_LOG)"
+
+# CTAB.PRG: the colour tables (vs_ctab, vq_ctab and the rest of 205/206) and
+# inverse tables (v_create_itab, v_delete_itab) of EmuTOS's VDI: the table
+# by pixel value, ids, defaults, tables made and deleted, refusals, and no
+# memory left behind by closed workstations.
+check-ctab-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI CTAB FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI CTAB GUEST PASS' "$(GUEST_LOG)"
+
+# DITHER.PRG: vr_transfer_bits with error diffusion (mode 128) and onto
+# 8-bit indices: against RGB32 references, palettes and inverse tables,
+# clipped dithering onto the screen against the whole rectangle in memory.
+check-dither-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI DITHER FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI DITHER GUEST PASS' "$(GUEST_LOG)"
+
+# BEZIER.PRG: v_bez, v_bez_fill, v_bez_on/off and v_bez_qual: the points of
+# fVDI's subdivision (checked against the cubic), the pixels of v_pline and
+# v_fillarea of them, moves, clipping, quality and limits.
+check-bezier-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI BEZIER FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI BEZIER GUEST PASS' "$(GUEST_LOG)"

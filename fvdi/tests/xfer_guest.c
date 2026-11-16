@@ -412,8 +412,9 @@ static void test_direct(void)
             /* replace is the same as copy for colours */
             if (s == 2)
                 run_to_memory("replace is copy for a direct source", &src, sr, SW * s, SH * s, 32, pix_direct, 0);
-            if (s == 1)
-                run_to_memory("dither (bit 7) is ignored", &src, sr, SW * s, SH * s, 128, pix_direct, 0);
+            /* bit 7 dithers onto planes (DITHER.PRG tests that); onto 16 bits it does nothing */
+            if (s == 1 && planes == 16)
+                run_to_memory("dither (bit 7) does nothing onto 16 bits", &src, sr, SW * s, SH * s, 128, pix_direct, 0);
         }
     /* a part of the source: the middle, with an origin that is not 0,0 */
     {
