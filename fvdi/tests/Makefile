@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log check-ctab-log check-dither-log check-bezier-log
+.PHONY: check guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log check-ctab-log check-dither-log check-bezier-log check-aatext-log
 check:
 	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -39,6 +39,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) ctab_guest.c -lgem -o $(TEST_BUILD)/CTAB.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) dither_guest.c -lgem -o $(TEST_BUILD)/DITHER.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) bezier_guest.c -lgem -o $(TEST_BUILD)/BEZIER.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) aatext_guest.c -lgem -o $(TEST_BUILD)/AATEXT.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) fontbusy_guest.c -lgem -o $(TEST_BUILD)/FONTBUSY.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
@@ -235,3 +236,10 @@ check-bezier-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI BEZIER FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI BEZIER GUEST PASS' "$(GUEST_LOG)"
+
+# AATEXT.PRG: anti-aliased outline text on a 16-bit screen, one-bit text on
+# fewer planes.  See the top of aatext_guest.c.
+check-aatext-log:
+	test -n "$(GUEST_LOG)"
+	! grep -Eq 'FVDI AATEXT FAIL|Panic' "$(GUEST_LOG)"
+	grep -Fq 'FVDI AATEXT GUEST PASS' "$(GUEST_LOG)"

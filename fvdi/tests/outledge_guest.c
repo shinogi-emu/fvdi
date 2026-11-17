@@ -36,6 +36,12 @@
  *   face=NAME  the checks after the listing use the face named NAME (up
  *              to the end of the line), or else one whose name starts
  *              with it, instead of Liberation Sans; it must be listed
+ *   mono=ADDR  the address (hex) of a WORD that makes EmuTOS's VDI draw
+ *              outline text one-bit when set (vdi_text_mono, see its
+ *              emutos.map): set for the checks, cleared at the end.  The
+ *              checks are of one-bit text, pixel for pixel; on a 16-bit
+ *              screen EmuTOS draws it anti-aliased otherwise (AATEXT
+ *              checks that)
  *   deep=NAME  the face named NAME (to the end of the line) has the
  *              glyphs of B to J nested too deep for the VDI's font stack,
  *              and the glyph of A not (a chain of composite glyphs that
@@ -75,6 +81,8 @@ static int failed;
 static short handle, scr_w, scr_h, planes, distinct, bg = FILL;
 static unsigned long p0, p1, pfill;     /* blank, text and background pixels */
 static short want_faces, lowmem;
+static unsigned long mono_addr;
+static short mono_value;
 static char want_face[40];
 static char want_deep[40];
 
@@ -113,6 +121,21 @@ static long ticks(void)
     return Supexec(read_hz200);
 }
 
+/* EmuTOS's switch to one-bit outline text */
+static long poke_mono(void)
+{
+    *(volatile short *)mono_addr = mono_value;
+    return 0;
+}
+
+static void set_mono(short on)
+{
+    if (!mono_addr)
+        return;
+    mono_value = on;
+    Supexec(poke_mono);
+}
+
 static void read_config(void)
 {
     char buf[200], *p;
@@ -138,6 +161,8 @@ static void read_config(void)
             want_face[i] = *p++;
         want_face[i] = 0;
     }
+    if ((p = strstr(buf, "mono=")) != NULL)
+        mono_addr = strtoul(p + 5, NULL, 16);
     if ((p = strstr(buf, "deep=")) != NULL)
     {
         short i;
@@ -1460,6 +1485,12 @@ int main(void)
 
     graf_mouse(M_OFF, 0);
     wind_update(BEG_UPDATE);
+    if (mono_addr)
+    {
+        snprintf(line, sizeof(line), "OUTLEDGE one-bit outline text: the switch at %lx set", mono_addr);
+        say(line);
+        set_mono(1);
+    }
 
     p0 = colour_value(0);
     p1 = colour_value(1);
@@ -1534,6 +1565,7 @@ done:
         vr_recfl(handle, box);
     }
     vst_font(handle, 1);
+    set_mono(0);
     wind_update(END_UPDATE);
     graf_mouse(M_ON, 0);
 out:
