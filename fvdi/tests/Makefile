@@ -10,16 +10,17 @@ WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
 .PHONY: check noint guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log check-ctab-log check-dither-log check-bezier-log check-aatext-log
 check: noint
-	$(CC) $(CFLAGS) -fsanitize=address,undefined -fno-omit-frame-pointer \
-		transfer.c indexed.c legacy.c alpha.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c ../engine/default.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
+	$(CC) $(CFLAGS) -I../drivers/include -fsanitize=address,undefined -fno-omit-frame-pointer \
+		transfer.c indexed.c legacy.c alpha.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c ../engine/default.c ../drivers/16_bit/16b_blend.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
 	ASAN_OPTIONS=detect_leaks=0 $(TEST_BUILD)/transfer-test
 
-# blend.h is shared with the drivers, which are built with 16-bit ints:
-# it must not use a plain int.
+# blend.h and the 16-bit driver's blend are built with 16-bit ints in the
+# drivers: they must not use a plain int.
+NOINT = ../include/blend.h ../drivers/16_bit/16b_blend.c
 noint:
-	@test -r ../include/blend.h
-	@if grep -nE '(^|[^A-Za-z0-9_])(unsigned[[:space:]]+)?int([^A-Za-z0-9_]|$$)' ../include/blend.h; then \
-	    echo "plain int in include/blend.h"; exit 1; fi
+	@for f in $(NOINT); do test -r $$f || exit 1; done
+	@if grep -nE '(^|[^A-Za-z0-9_])(unsigned[[:space:]]+)?int([^A-Za-z0-9_]|$$)' $(NOINT); then \
+	    echo "plain int in $(NOINT)"; exit 1; fi
 
 guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) -DRASTER_TEST_REZ=1 video_mode_guest.c -o $(TEST_BUILD)/MODE2.PRG
@@ -51,7 +52,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) fontbusy_guest.c -lgem -o $(TEST_BUILD)/FONTBUSY.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
-	$(GUEST_CC) $(GUEST_CFLAGS) transfer.c indexed.c legacy.c alpha.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c ../engine/default.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) -I../drivers/include transfer.c indexed.c legacy.c alpha.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c ../engine/default.c ../drivers/16_bit/16b_blend.c $(WRAP_ALLOC) -o $(TEST_BUILD)/REFCHECK.PRG
 
 # A surviving emulator / successful screenshot is not a passing raster test.
 check-guest-log:

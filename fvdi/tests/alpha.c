@@ -23,6 +23,9 @@ Virtual *raster_screen(int, int, unsigned char *, int, int, int);
 void raster_screen_counts(long *, long *, long *);
 void CDECL vr_transfer_bits(Virtual *, GCBITMAP *, GCBITMAP *, RECT16 *, RECT16 *, long);
 void call_draw_line(Virtual *, DrvLine *);
+/* The 16-bit driver's T_BLEND onto its screen (drivers/16_bit/16b_blend.c) */
+long CDECL c_blend_argb(Virtual *, const unsigned char *, long, long, long, long, long,
+                        const unsigned long [3]);
 
 #define RGB32       0x03421820UL
 #define RGB565      0x03021010UL
@@ -731,6 +734,17 @@ static long smaller(long a, long b) { return a < b ? a : b; }
 static int screen_pool_missing;         /* no pool block: nothing may be drawn */
 static long last_reads, last_visible;   /* of the last screen image */
 
+/* The driver of the fake screen: NULL for tests/transfer.c's, whose setup()
+ * is NULL (no driver blend), or one of hook_dispatch()'s.  What the engine
+ * is to do with it in blend_screen_image(): read back through the blit, or
+ * hand the driver's blend (fake_hook()) the caller's rows or strips of
+ * converted rows.
+ */
+static Driver *screen_driver;
+enum { PATH_READ_BACK, PATH_ROWS, PATH_STRIPS };
+static int screen_path = PATH_READ_BACK;
+static long screen_hook_calls;          /* of the last screen image */
+
 /* The fake screen in layout l of layouts[]: kind 0 plain, 1 with a shadow,
  * 2 without an address (VRAM not mapped: only the driver's blit reaches it).
  */
@@ -745,7 +759,57 @@ static Virtual *blend_screen(int l, int kind)
         w->driver->device->scrmap.bitnumber.green[i] = layouts[l].gpos + i;
     w->screen.wrap = SCREEN_WRAP;
     w->screen.shadow.address = kind == 1 ? shadow_px.b : NULL;
+    if (screen_driver)
+    {
+        screen_driver->device = w->driver->device;
+        w->driver = screen_driver;
+    }
     return v;
+}
+
+/* The driver's blend as hook_dispatch()'s drivers offer it: it checks what
+ * the engine hands it and draws with the 16-bit driver's c_blend_argb(),
+ * unless hook_answer is 0 (the driver declines).  The caller's rows must
+ * lie in hook_lo-hook_hi, hook_pitch bytes apart; strips are rows of
+ * whole groups of 16 pixels.  Each pixel drawn is counted in hook_cover.
+ */
+static long hook_calls;
+static int hook_answer = 1, hook_kinds;     /* hook_kinds: 1 << PATH_ROWS, 1 << PATH_STRIPS */
+static const unsigned char *hook_lo, *hook_hi;
+static long hook_pitch;
+static unsigned char hook_cover[SCREEN_H][SCREEN_W];
+
+static long CDECL fake_hook(Virtual *v, const unsigned char *src, long pitch, long x, long y,
+                            long w, long h, const unsigned long wprime[3])
+{
+    Workstation *wk = v->real_address;
+    long i, j, done;
+
+    hook_calls++;
+    assert(w > 0 && h > 0 && x >= 0 && y >= 0);
+    assert(x + w <= wk->screen.mfdb.width && y + h <= wk->screen.mfdb.height);
+    if (v->clip.on)
+    {
+        assert(x >= v->clip.rectangle.x1 && y >= v->clip.rectangle.y1);
+        assert(x + w - 1 <= v->clip.rectangle.x2 && y + h - 1 <= v->clip.rectangle.y2);
+    }
+    if (src >= hook_lo && src < hook_hi)
+    {
+        assert(pitch == hook_pitch && src + (h - 1) * pitch + w * 4 <= hook_hi);
+        hook_kinds |= 1 << PATH_ROWS;
+    } else
+    {
+        assert(pitch % 64 == 0 && pitch >= w * 4);
+        hook_kinds |= 1 << PATH_STRIPS;
+    }
+    if (!hook_answer)
+        return 0;
+    done = c_blend_argb(v, src, pitch, x, y, w, h, wprime);
+    if (done)
+        for (j = 0; j < h; j++)
+            for (i = 0; i < w; i++)
+                hook_cover[y + j][x + i]++;
+    return done;
 }
 
 /* Background bg of the vectors in layout l: the 555 colours for 555, the
@@ -808,8 +872,12 @@ static unsigned long area_crc(unsigned short a[ALPHA_IMG_H][ALPHA_IMG_W])
  * and the rest of the screen untouched, the shadow equal to the screen,
  * each read written back, every pixel drawn read once and no other (no
  * pixel blended twice, none left out), one pool block, none when nothing
- * is visible, and no allocation.  Returns the area as the vectors' CRC
- * takes it, when it is all on the screen.
+ * is visible, and no allocation.  When screen_path says the driver blends
+ * (hook_dispatch()), nothing is read back and each visible pixel is drawn
+ * once by the driver instead: from the caller's rows in one call and
+ * without a pool block, or from strips of converted rows in one pool
+ * block.  Returns the area as the vectors' CRC takes it, when it is all on
+ * the screen.
  */
 static unsigned long blend_screen_image(const AlphaXfer *t, int l, int kind, int ox, int oy,
                                         int variant, unsigned short expect[ALPHA_IMG_H][ALPHA_IMG_W])
@@ -825,9 +893,16 @@ static unsigned long blend_screen_image(const AlphaXfer *t, int l, int kind, int
     long x1, y1, x2, y2;
     unsigned long crc = 0xffffffffUL;
     int x, y, whole = ox >= 0 && oy >= 0 && ox + ALPHA_IMG_W <= SCREEN_W && oy + ALPHA_IMG_H <= SCREEN_H;
-    long i;
+    /* without a pool block nothing is drawn, except by the driver from the caller's rows */
+    int nothing = screen_pool_missing && screen_path != PATH_ROWS;
+    long i, calls = hook_calls;
 
     memcpy(s_saved.b, s.b, SRC_BYTES);
+    memset(hook_cover, 0, sizeof(hook_cover));
+    hook_kinds = 0;
+    hook_lo = s.b;
+    hook_hi = s.b + SRC_BYTES;
+    hook_pitch = SRC_STRIDE;
     for (i = 0; i < SCREEN_BYTES; i++)
         screen_px.b[i] = (unsigned char)(i * 29 + 7);
     memcpy(screen_expect.b, screen_px.b, SCREEN_BYTES);
@@ -837,8 +912,7 @@ static unsigned long blend_screen_image(const AlphaXfer *t, int l, int kind, int
             {
                 long at = (long)(oy + y) * SCREEN_WRAP + (ox + x) * 2;
                 put16(screen_px.b + at, background(t->bg, l, x, y), 0);
-                put16(screen_expect.b + at,
-                      screen_pool_missing ? background(t->bg, l, x, y) : expect[y][x], 0);
+                put16(screen_expect.b + at, nothing ? background(t->bg, l, x, y) : expect[y][x], 0);
             }
     memcpy(shadow_px.b, screen_px.b, SCREEN_BYTES);
     dr.x1 = t->dr[0] + ox; dr.y1 = t->dr[1] + oy; dr.x2 = t->dr[2] + ox; dr.y2 = t->dr[3] + oy;
@@ -873,9 +947,25 @@ static unsigned long blend_screen_image(const AlphaXfer *t, int l, int kind, int
     assert(memcmp(screen_px.b, screen_expect.b, SCREEN_BYTES) == 0);
     if (kind == 1)
         assert(memcmp(shadow_px.b, screen_px.b, SCREEN_BYTES) == 0);
-    assert(writes_after - writes == last_reads);
-    assert(pixels_after - pixels == (screen_pool_missing ? 0 : last_visible));
-    assert(raster_pool_takes() == takes + (!screen_pool_missing && last_visible > 0));
+    screen_hook_calls = hook_calls - calls;
+    if (screen_path == PATH_READ_BACK)
+    {
+        assert(writes_after - writes == last_reads);
+        assert(pixels_after - pixels == (screen_pool_missing ? 0 : last_visible));
+        assert(raster_pool_takes() == takes + (!screen_pool_missing && last_visible > 0));
+    } else
+    {
+        /* the driver drew: nothing read back or written through the blit */
+        assert(last_reads == 0 && writes_after == writes && pixels_after == pixels);
+        assert(raster_pool_takes() == takes + (screen_path == PATH_STRIPS && !screen_pool_missing &&
+                                               last_visible > 0));
+        assert(hook_kinds == (last_visible > 0 && !nothing ? 1 << screen_path : 0));
+        if (screen_path == PATH_ROWS)
+            assert(screen_hook_calls == (last_visible > 0));
+        for (y = 0; y < SCREEN_H; y++)
+            for (x = 0; x < SCREEN_W; x++)
+                assert(hook_cover[y][x] == (!nothing && x >= x1 && x <= x2 && y >= y1 && y <= y2));
+    }
     assert(raster_allocations() == allocations);
     assert(memcmp(s.b, s_saved.b, SRC_BYTES) == 0);
     screen_images++;
@@ -1095,8 +1185,11 @@ static int screen_draws(Virtual *v)
     return changed;
 }
 
-/* transfer_blend_ok(), bit 3 of vq_extnd's work_out[30], and whether the
- * screen blends: the same answer on every kind of screen.
+/* transfer_blend_ok(), which lib_vq_extnd (engine/workstn.c, not linked
+ * here) turns into bit 3 of work_out[30], against whether the screen
+ * blends.  The bit is set only where the screen blends and vq_px_format
+ * names its layout (565, 555): the layouts with a gap blend all the same,
+ * and nothing else blends.
  */
 static void blend_ok_layouts(void)
 {
@@ -1109,17 +1202,27 @@ static void blend_ok_layouts(void)
         for (kind = 0; kind < 3; kind++)
         {
             v = blend_screen(l, kind);
-            assert(transfer_blend_ok(v->real_address) == 1 && screen_draws(v));
+            assert(transfer_blend_ok(v) == (l < 2) && screen_draws(v));
         }
+    /* a screen of no use: no width, no height, lines shorter than the width */
+    v = blend_screen(0, 0);
+    v->real_address->screen.mfdb.width = 0;
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
+    v = blend_screen(1, 1);
+    v->real_address->screen.mfdb.height = 0;
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
+    v = blend_screen(0, 2);
+    v->real_address->screen.wrap = SCREEN_W * 2 - 2;
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     /* 8 planes */
     v = blend_screen(0, 0);
     v->real_address->screen.mfdb.bitplanes = 8;
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     /* 16 bits in a layout the engine does not know: red not in one run,
        blue at the top, six bits of green under red at bit 10, planes */
     v = blend_screen(0, 0);
     v->real_address->driver->device->scrmap.bitnumber.red[3] = 0;
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     v = blend_screen(0, 0);
     dev = v->real_address->driver->device;
     for (i = 0; i < 5; i++)
@@ -1127,15 +1230,15 @@ static void blend_ok_layouts(void)
         dev->scrmap.bitnumber.red[i] = i;
         dev->scrmap.bitnumber.blue[i] = 11 + i;
     }
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     v = blend_screen(1, 0);
     dev = v->real_address->driver->device;
     dev->bits.green = 6;
     dev->scrmap.bitnumber.green[5] = 10;
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     v = blend_screen(0, 0);
     v->real_address->driver->device->format = 0;
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     /* 24 and 32 bits */
     for (i = 24; i <= 32; i += 8)
     {
@@ -1153,16 +1256,262 @@ static void blend_ok_layouts(void)
             dev->scrmap.bitnumber.green[c] = 8 + c;
             dev->scrmap.bitnumber.blue[c] = c;
         }
-        assert(!transfer_blend_ok(w) && !screen_draws(v));
+        assert(!transfer_blend_ok(v) && !screen_draws(v));
     }
     /* no device, no driver */
     v = blend_screen(0, 0);
     v->real_address->driver->device = NULL;
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
     v = blend_screen(0, 0);
     v->real_address->driver = NULL;
-    assert(!transfer_blend_ok(v->real_address) && !screen_draws(v));
-    comparisons += 21;
+    assert(!transfer_blend_ok(v) && !screen_draws(v));
+    comparisons += 24;
+}
+
+/* The 16-bit driver's blend (drivers/16_bit/16b_blend.c) called as the
+ * engine calls it: the icon and the ramp at 1:1, at two places on the 565
+ * fake screen with padded lines, at every weight of the vectors, without
+ * and with a shadow, against the bytes the read-back path gives for the
+ * same input.  With a shadow the screen starts different from it: the
+ * blend reads the shadow and writes both, and the pixels under alpha 0
+ * keep what each had.  Then every 1:1 transfer of the vectors through the
+ * driver alone gives the vectors' CRC.  A screen without an address or of
+ * other depths is declined untouched; an empty rectangle is done.
+ */
+static long hook_images;
+
+static void hook_equals_generic(void)
+{
+    static const int places[2][2] = { { 5, 3 }, { 31, 22 } };
+    static union { unsigned long align; unsigned char b[SCREEN_BYTES]; } start, generic, shadow_expect;
+    static union { unsigned long align; unsigned char b[SRC_BYTES]; } s;
+    BlendHook direct = c_blend_argb;          /* the type the engine calls it by */
+    unsigned long wprime[3];
+    long i;
+    int src, w, kind, p, x, y, t, c;
+
+    for (src = 0; src < 2; src++)
+    {
+        int sw = alpha_src[src].w, sh = alpha_src[src].h;
+        GCBITMAP image = bitmap(s.b, sw, sh, 32, PX_ARGB32);
+        RECT16 sr;
+
+        sr.x1 = 0; sr.y1 = 0; sr.x2 = sw - 1; sr.y2 = sh - 1;
+        image.width = SRC_STRIDE;
+        memset(s.b, 0x5a, SRC_BYTES);
+        for (y = 0; y < sh; y++)
+            for (x = 0; x < sw; x++)
+                put_source(s.b + y * SRC_STRIDE + x * 4, alpha_src[src].argb[y * sw + x], PX_ARGB32);
+        for (w = 0; w < ALPHA_NWEIGHTS; w++)
+        {
+            for (c = 0; c < 3; c++)
+                wprime[c] = blend_wprime(alpha_weight[w][c]);
+            for (kind = 0; kind < 2; kind++)
+                for (p = 0; p < 2; p++)
+                {
+                    Virtual *v = blend_screen(0, kind);
+                    RECT16 dr;
+
+                    dr.x1 = places[p][0]; dr.y1 = places[p][1];
+                    dr.x2 = dr.x1 + sw - 1; dr.y2 = dr.y1 + sh - 1;
+                    for (i = 0; i < SCREEN_BYTES; i++)
+                        start.b[i] = (unsigned char)(i * 29 + 7 + w + p);
+                    /* the read-back path */
+                    memcpy(screen_px.b, start.b, SCREEN_BYTES);
+                    memcpy(shadow_px.b, start.b, SCREEN_BYTES);
+                    set_weight(v, w);
+                    transfer_blend(v, &image, NULL, &sr, &dr, T_BLEND);
+                    x_colours_close(v);
+                    memcpy(generic.b, screen_px.b, SCREEN_BYTES);
+                    /* something changed, unless k is 0 at every alpha (weights 0 and 1, 2, 3) */
+                    assert(!(alpha_k[w][255][0] | alpha_k[w][255][1] | alpha_k[w][255][2]) ||
+                           memcmp(generic.b, start.b, SCREEN_BYTES) != 0);
+                    /* the driver; with a shadow the screen starts as something else */
+                    memcpy(shadow_px.b, start.b, SCREEN_BYTES);
+                    for (i = 0; i < SCREEN_BYTES; i++)
+                        screen_px.b[i] = (unsigned char)(start.b[i] ^ (kind ? 0xa5 : 0));
+                    memcpy(screen_expect.b, screen_px.b, SCREEN_BYTES);
+                    memcpy(shadow_expect.b, start.b, SCREEN_BYTES);
+                    for (y = dr.y1; y <= dr.y2; y++)
+                        for (x = dr.x1; x <= dr.x2; x++)
+                            if (alpha_src[src].argb[(y - dr.y1) * sw + x - dr.x1] >> 24)
+                            {
+                                long at = (long)y * SCREEN_WRAP + x * 2;
+                                memcpy(screen_expect.b + at, generic.b + at, 2);
+                                memcpy(shadow_expect.b + at, generic.b + at, 2);
+                            }
+                    assert(direct(v, s.b, SRC_STRIDE, dr.x1, dr.y1, sw, sh, wprime) == 1);
+                    assert(memcmp(screen_px.b, screen_expect.b, SCREEN_BYTES) == 0);
+                    if (kind)
+                        assert(memcmp(shadow_px.b, shadow_expect.b, SCREEN_BYTES) == 0);
+                    hook_images++;
+                    comparisons += 2;
+                }
+        }
+    }
+
+    /* the vectors' 1:1 transfers, the clipped part of each where clipped */
+    for (t = 0; t < ALPHA_NXFER; t++)
+    {
+        const AlphaXfer *e = &alpha_xfer[t];
+        long x1 = e->dr[0], y1 = e->dr[1], x2 = e->dr[2], y2 = e->dr[3];
+        Virtual *v;
+        RECT16 sr;
+        GCBITMAP image;
+        unsigned long crc = 0xffffffffUL;
+
+        if (e->sr[2] - e->sr[0] != e->dr[2] - e->dr[0] || e->sr[3] - e->sr[1] != e->dr[3] - e->dr[1])
+            continue;
+        if (e->clip)
+        {
+            x1 = larger(x1, e->cr[0]); y1 = larger(y1, e->cr[1]);
+            x2 = smaller(x2, e->cr[2]); y2 = smaller(y2, e->cr[3]);
+        }
+        image = source_image(e, PX_ARGB32, s.b, &sr);
+        v = blend_screen(0, t & 1);
+        memset(screen_px.b, 0x3c, SCREEN_BYTES);
+        for (y = 0; y < ALPHA_IMG_H; y++)
+            for (x = 0; x < ALPHA_IMG_W; x++)
+                put16(screen_px.b + (long)(5 + y) * SCREEN_WRAP + (7 + x) * 2, alpha_bg565[e->bg][y][x], 0);
+        memcpy(shadow_px.b, screen_px.b, SCREEN_BYTES);
+        for (c = 0; c < 3; c++)
+            wprime[c] = blend_wprime(alpha_weight[e->weight][c]);
+        assert(direct(v, image.addr + (sr.y1 - image.ymin + (y1 - e->dr[1])) * image.width +
+                         (sr.x1 - image.xmin + (x1 - e->dr[0])) * 4,
+                      image.width, 7 + x1, 5 + y1, x2 - x1 + 1, y2 - y1 + 1, wprime) == 1);
+        for (y = 0; y < ALPHA_IMG_H; y++)
+            for (x = 0; x < ALPHA_IMG_W; x++)
+            {
+                const unsigned char *q = screen_px.b + (long)(5 + y) * SCREEN_WRAP + (7 + x) * 2;
+                crc = crc_byte(crc_byte(crc, q[0]), q[1]);
+            }
+        assert((crc ^ 0xffffffffUL) == e->crc565);
+        if (t & 1)
+            assert(memcmp(shadow_px.b, screen_px.b, SCREEN_BYTES) == 0);
+        hook_images++;
+        comparisons++;
+    }
+
+    /* declined: no address, 8 planes; done: nothing to draw */
+    for (c = 0; c < 3; c++)
+        wprime[c] = 65536;
+    for (i = 0; i < 4; i++)
+    {
+        Virtual *v = blend_screen(0, i == 0 ? 2 : i & 1);
+
+        if (i == 1)
+            v->real_address->screen.mfdb.bitplanes = 8;
+        memset(screen_px.b, 0x3c, SCREEN_BYTES);
+        memset(shadow_px.b, 0xc3, SCREEN_BYTES);
+        memcpy(screen_expect.b, screen_px.b, SCREEN_BYTES);
+        memset(s.b, 0xff, SRC_BYTES);
+        assert(direct(v, s.b, SRC_STRIDE, 3, 4, i == 2 ? 0 : 5, i == 3 ? 0 : 5, wprime) == (i >= 2));
+        assert(memcmp(screen_px.b, screen_expect.b, SCREEN_BYTES) == 0);
+        for (p = 0; p < SCREEN_BYTES; p++)
+            assert(shadow_px.b[p] == 0xc3);
+        comparisons++;
+    }
+}
+
+/* Drivers whose setup() answers Q_BLEND_ARGB with fake_hook, and -1.  The
+ * engine keeps the answer per driver, so each keeps its setup().
+ */
+static Driver hook_driver_yes, hook_driver_no;
+
+static long CDECL setup_with_hook(long type, long value)
+{
+    (void)value;
+    return type == Q_BLEND_ARGB ? (long)fake_hook : -1;
+}
+
+static long CDECL setup_without_hook(long type, long value)
+{
+    (void)type;
+    (void)value;
+    return -1;
+}
+
+/* One alpha_xfer entry on the 565 fake screen (see blend_screen_image())
+ * through the driver that offers its blend, drawing and then declining,
+ * and through the driver that does not.  PX_ARGB32 at 1:1 goes to the
+ * driver as the caller's rows, in one call and without a pool block; other
+ * sources, and scaled ones, as strips of converted rows when a pool block
+ * holds 16 of them (capacity 64 bytes or more; 0: no pool block).  The
+ * driver declines on a screen without an address, as hook_answer 0 makes
+ * it decline everywhere: then the read-back path draws the same pixels,
+ * after one call.  Returns the calls with strips.
+ */
+static long hook_entry(const AlphaXfer *x, int kind, int ox, int oy, int variant, long capacity,
+                       unsigned short expect[ALPHA_IMG_H][ALPHA_IMG_W])
+{
+    int rows = !(variant & 1) && x->sr[2] - x->sr[0] == x->dr[2] - x->dr[0] &&
+               x->sr[3] - x->sr[1] == x->dr[3] - x->dr[1];
+    int asked = rows || capacity >= 64;     /* whether the driver is asked once at least */
+    int whole = ox >= 0 && oy >= 0 && ox + ALPHA_IMG_W <= SCREEN_W && oy + ALPHA_IMG_H <= SCREEN_H;
+    long strips = 0;
+    unsigned long crc;
+
+    screen_driver = &hook_driver_yes;
+    hook_answer = 1;
+    screen_path = kind == 2 ? PATH_READ_BACK : rows ? PATH_ROWS :
+                  capacity >= 64 ? PATH_STRIPS : PATH_READ_BACK;
+    crc = blend_screen_image(x, 0, kind, ox, oy, variant, expect);
+    if (whole && (capacity || screen_path == PATH_ROWS))
+        assert(crc == x->crc565);
+    if (screen_path == PATH_STRIPS)
+    {
+        assert(screen_hook_calls >= (last_visible > 0));
+        strips = screen_hook_calls;
+    } else if (screen_path == PATH_READ_BACK)
+        assert(screen_hook_calls == (last_visible > 0 && asked));
+    hook_answer = 0;
+    screen_path = PATH_READ_BACK;
+    blend_screen_image(x, 0, kind, ox, oy, variant, expect);
+    assert(screen_hook_calls == (last_visible > 0 && asked));
+    hook_answer = 1;
+    screen_driver = &hook_driver_no;
+    blend_screen_image(x, 0, kind, ox, oy, variant, expect);
+    assert(screen_hook_calls == 0);
+    screen_driver = NULL;
+    hook_images += 3;
+    return strips;
+}
+
+static void hook_dispatch(void)
+{
+    static const int offsets[3][2] = { { 7, 5 }, { -9, -6 }, { 30, 20 } };
+    static const long capacities[6] = { 16384, 64, 100, 200, 32, 0 };
+    static unsigned short expect[ALPHA_IMG_H][ALPHA_IMG_W];
+    long strips = 0, strip_images = 0;
+    int c, t, kind, o;
+
+    hook_driver_yes.module.setup = setup_with_hook;
+    hook_driver_no.module.setup = setup_without_hook;
+    for (c = 0; c < 6; c++)
+    {
+        raster_pool(capacities[c] ? capacities[c] : 16384, capacities[c] == 0);
+        screen_pool_missing = capacities[c] == 0;
+        for (t = 0; t < ALPHA_NXFER; t++)
+        {
+            reference_area(&alpha_xfer[t], 0, expect);
+            for (kind = 0; kind < 3; kind++)
+                for (o = 0; o < 3; o++)
+                {
+                    long n = hook_entry(&alpha_xfer[t], kind, offsets[o][0], offsets[o][1],
+                                        (t + kind + o + c) & 15, capacities[c], expect);
+                    if (c >= 1 && c <= 3 && n)
+                    {
+                        strips += n;
+                        strip_images++;
+                    }
+                }
+        }
+    }
+    screen_pool_missing = 0;
+    raster_pool(10240, 0);
+    screen_path = PATH_READ_BACK;
+    /* blocks of 64-200 bytes hold one to three rows of 16 converted pixels */
+    assert(strip_images > 0 && strips > 3 * strip_images);
 }
 
 /* Modes 0 and 32 take ARGB and RGBA sources with the alpha ignored: the
@@ -1314,6 +1663,8 @@ void alpha_tests(void)
     blend_screen_strips();
     blend_screen_refusals();
     blend_ok_layouts();
+    hook_equals_generic();
+    hook_dispatch();
     modes_0_32_formats();
     weight_accessor();
     assert(raster_allocations() == allocations);
@@ -1321,4 +1672,6 @@ void alpha_tests(void)
            comparisons, (unsigned long)ALPHA_VECTORS_SUM);
     printf("%ld alpha screen images passed (565/555/gap layouts, with and without a shadow or an address, clipped, in strips); %ld read-backs, each written back as the same rectangle\n",
            screen_images, screen_read_backs);
+    printf("%ld driver blend images passed (16b_blend.c against the read-back path and the vectors; the caller's rows, strips, declined, setup() -1, no pool block)\n",
+           hook_images);
 }

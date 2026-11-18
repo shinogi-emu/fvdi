@@ -97,15 +97,16 @@ component C, in integers:
     s   = C >> (8 - n)
     out = (d * 256 + (s - d) * kc + 128) >> 8
 
-A pixel with A = 0 is left as it is (in memory neither read nor written;
-on the screen written back as it was read, see below). Every other pixel
-is written, with 0 in the bits outside the three fields, also at zero
-weight: this clears bit 15 of RGB555, and in the 5-5-5 layouts with a gap
-the gap bit, bit 5 or bit 10. At A = 255 and full weight the pixel is
-what mode 32 writes. The arithmetic is shared with the drivers in
-include/blend.h (shorts and longs only, for -mshort), and EmuTOS's VDI
-computes the same pixels; both are checked against the same reference
-vectors (tests/alpha_vectors.h).
+A pixel with A = 0 is left as it is: in memory, and on the screen of a
+driver with its own blend, it is neither read nor written; on the screen
+through the read-back path it is written back as it was read (see below).
+Every other pixel is written, with 0 in the bits outside the three
+fields, also at zero weight: this clears bit 15 of RGB555, and in the
+5-5-5 layouts with a gap the gap bit, bit 5 or bit 10. At A = 255 and
+full weight the pixel is what mode 32 writes. The arithmetic is shared
+with the drivers in include/blend.h (shorts and longs only, for -mshort),
+and EmuTOS's VDI computes the same pixels; both are checked against the
+same reference vectors (tests/alpha_vectors.h).
 
 The weight is vs_weight_color (opcode 207, sub-function 3), kept per
 workstation; a workstation that has not set it blends with 0x8000 on every
@@ -137,6 +138,26 @@ mapped: the engine never touches VRAM itself. Each pixel of the clipped
 rectangle is read and written once per call, nothing outside it is read,
 and without a pool block nothing is drawn.
 
+A driver may blend onto its screen itself. The engine asks the driver's
+setup(Q_BLEND_ARGB, 0) once (and again only for another driver); an
+answer other than -1 or 0 is a BlendHook (include/blend.h): w x h pixels
+of PX_ARGB32 rows, already clipped, blended at (x, y) with the weights of
+the call, returning 1 when drawn and 0 to leave the call to the engine.
+PX_ARGB32 at 1:1 goes to it as the caller's own rows, in one call and
+without a pool block; other sources and scaled ones as strips sampled and
+converted to PX_ARGB32 in a pool block (no block of 64 bytes, no driver
+blend). When the driver declines, the read-back path draws instead, the
+same pixels. The hook is for the engine: fVDI's cookie reaches setup()
+too, but it is not a call for programs. 16_bit.sys has one
+(drivers/16_bit/16b_blend.c, RGB565): it reads the shadow when there is
+one, else the screen, writes both, and leaves pixels with A = 0 alone in
+both. Building the engine with -DFVDI_NO_BLEND_HOOK asks no driver.
+
+As for every copy to the screen, the VDI does not hide the mouse: a
+caller that draws where the pointer may be hides it first (graf_mouse
+M_OFF or v_hide_c), else the pointer's pixels may be blended in or left
+behind.
+
 Refused, drawing nothing: the other arithmetic modes (65-127, also
 T_BLEND with T_COLORIZE, 80), indexed and 1-bit sources, PX_REVERSED or
 other variants of the alpha formats, memory destinations that are not
@@ -148,8 +169,12 @@ arithmetic mode to this code, so none reaches the older paths, which copy
 regardless of the mode.
 
 Detection: vq_extnd(handle, 1, work_out) sets bit 3 (value 8) of
-work_out[30] when T_BLEND draws on the workstation's screen; otherwise
-work_out[30] is 4 (vr_clip_rects) as before.
+work_out[30] when T_BLEND draws on the workstation's screen and
+vq_px_format describes that screen as RGB565 or RGB555; otherwise
+work_out[30] is 4 (vr_clip_rects) as before. The 5-5-5 layouts with a gap
+blend when called, but vq_px_format has no name for them (it answers 0),
+so the bit stays clear there. Drawing and the bit share one test of the
+screen (16 bitplanes, a known layout, a usable size).
 
 
 Bounds, storage and fast paths
@@ -248,9 +273,12 @@ shared alpha vectors: kc for every alpha and weight, 4,096 pixels in every
 onto 565, 555 and gap-layout screens (with and without a shadow or an
 address, at the screen's edges, through vs_clip and in strips down to 16
 pixels, each read written back as the same rectangle) and the refusals,
-through vr_transfer_bits as well. Independent references use 64-bit
-coordinates/weighted sums, brute-force palette searches and two wide
-diffusion rows. The same references also pass on a 68060.
+through vr_transfer_bits as well. 16_bit.sys's blend is checked against
+the read-back path's pixels and the vectors, with and without a shadow,
+and the engine's choice between them: the caller's rows, strips, a driver
+that declines, a setup() without the blend. Independent references use
+64-bit coordinates/weighted sums, brute-force palette searches and two
+wide diffusion rows. The same references also pass on a 68060.
 
 Real VDI traps were tested on the normal Shinogi MiNT/XaAES 68060 stack at
 1280x720 RGB565 and on Hatari ST/STE/TT at 1/2/4/8 planes, covering

@@ -1087,9 +1087,10 @@ int lib_vq_extnd(Virtual *vwk, long subfunction, long flag, short *intout, short
         *intout++ = 2;   /* Beziers! */
         *intout++ = 0;   /* Unused */
         /* 1 - bitmap scale, 2 - new raster functions, 4 - vr_clip_rects_xxx,
-         * 8 - vr_transfer_bits blends alpha images onto this screen (T_BLEND)
+         * 8 - vr_transfer_bits blends alpha images onto this screen (T_BLEND),
+         *     which vq_px_format describes as RGB565 or RGB555
          */
-        *intout++ = 4 | (transfer_blend_ok(wk) ? 8 : 0);
+        *intout++ = 4 | (transfer_blend_ok(vwk) ? 8 : 0);
         *intout++ = 0;   /* 9 from here used to be reserved */
         *intout++ = 1;   /* New style colour routines (at least some of them) */
         *intout++ = 0;

@@ -6,7 +6,7 @@
  * Independent implementation of the documented NVDI 5 raster interface.
  * RGB32/ARGB32/RGBA32/RGB16/indexed sources to RGB16/indexed destinations,
  * including native screens, and T_BLEND of direct sources into RGB16 memory
- * and onto RGB16 screens.
+ * and onto RGB16 screens, through the driver's own blend where it has one.
  * Do not advertise complete new-raster support: other pairs are absent.
  */
 
@@ -97,6 +97,20 @@ PIXEL_INLINE unsigned long read_rgb(const unsigned char *p)
 #else
     return ((unsigned long)p[0] << 24) | ((unsigned long)p[1] << 16) |
            ((unsigned long)p[2] << 8) | p[3];
+#endif
+}
+
+/* A long of the pool block (even address): 0xAARRGGBB as bytes A, R, G, B. */
+PIXEL_INLINE void write_rgb(unsigned char *p, unsigned long value)
+{
+#if defined(__m68k__)
+    typedef uint32_t PixelWord __attribute__((may_alias));
+    *(PixelWord *)p = value;
+#else
+    p[0] = value >> 24;
+    p[1] = value >> 16;
+    p[2] = value >> 8;
+    p[3] = value;
 #endif
 }
 
@@ -413,6 +427,62 @@ static void blend_render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr
     }
 }
 
+/* T_BLEND through the driver (a BlendHook): the part draw of dr as rows of
+ * PX_ARGB32 from dst, stride bytes apart, sampled as blend_render() samples
+ * (the nearest source pixel, the phase of the whole of dr).  Sources
+ * without alpha get alpha 255.  A row that samples the same source row as
+ * the one before is copied: the rows are not blended here.
+ */
+static void argb_render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr,
+                        const RECT16 *draw, unsigned char *dst, long stride)
+{
+    unsigned long format = src->px_format;
+    unsigned long sw = (long)sr->x2 - sr->x1 + 1;
+    unsigned long sh = (long)sr->y2 - sr->y1 + 1;
+    unsigned long dw = (long)dr->x2 - dr->x1 + 1;
+    unsigned long dh = (long)dr->y2 - dr->y1 + 1;
+    Axis initial_x = axis_start(sw, dw, (long)draw->x1 - dr->x1, 0);
+    Axis y = axis_start(sh, dh, (long)draw->y1 - dr->y1, 0);
+    long count = (long)draw->x2 - draw->x1 + 1;
+    long rows = (long)draw->y2 - draw->y1 + 1;
+    long previous_y = -1;
+    long pixel_bytes = src->bits / 8;
+    const unsigned char *base = src->addr + ((long)sr->y1 - src->ymin) * src->width +
+                                ((long)sr->x1 - src->xmin) * pixel_bytes;
+    unsigned long value;
+
+    while (rows--)
+    {
+        const unsigned char *row = base + y.pos * src->width;
+        unsigned char *out = dst;
+        Axis x = initial_x;
+        long n = count;
+
+        if (y.pos == previous_y)
+            memcpy(dst, dst - stride, count * 4);
+        else
+            while (n--)
+            {
+                const unsigned char *p = row + x.pos * pixel_bytes;
+
+                if (format == PX_ARGB32)
+                    value = read_rgb(p);
+                else if (format == PX_RGBA32)
+                {
+                    value = read_rgb(p);
+                    value = (value >> 8) | ((value & 255) << 24);
+                } else
+                    value = 0xff000000UL | (read_direct(p, format) & 0xffffffUL);
+                write_rgb(out, value);
+                out += 4;
+                axis_next(&x);
+            }
+        dst += stride;
+        previous_y = y.pos;
+        axis_next(&y);
+    }
+}
+
 /* Limit descriptions to the coordinate space RECT16 can address, and check
  * row sizes/products before forming pointers. The caller owns the storage.
  */
@@ -482,6 +552,19 @@ static int screen_packing(const Device *dev, Packing *p)
     return 1;
 }
 
+/* Whether the screen of wk is an RGB16 destination, and its layout: 16
+ * bitplanes in a layout screen_packing() knows, of a size that can be
+ * drawn.  The one test for drawing (screen_area()) and for advertising
+ * T_BLEND (transfer_blend_ok()), so that the two cannot drift apart.
+ */
+static int screen_rgb16(const Workstation *wk, Packing *packing)
+{
+    return wk->screen.mfdb.bitplanes == 16 && wk->driver &&
+           screen_packing(wk->driver->device, packing) &&
+           wk->screen.mfdb.width > 0 && wk->screen.mfdb.height > 0 &&
+           wk->screen.wrap >= (long)wk->screen.mfdb.width * 2;
+}
+
 /* The screen as an RGB16 destination: its layout, and the part of it that
  * may be drawn, all of it or, when clipping is on, its cut with the vs_clip
  * rectangle.  The source must not lie in the screen or its shadow.  Returns
@@ -493,10 +576,7 @@ static int screen_area(Virtual *vwk, const GCBITMAP *src, unsigned long src_byte
     Workstation *wk = vwk->real_address;
     unsigned long screen_bytes;
 
-    if (!wk->driver || !screen_packing(wk->driver->device, packing) ||
-        wk->screen.mfdb.width <= 0 ||
-        wk->screen.mfdb.height <= 0 ||
-        wk->screen.wrap < (long)wk->screen.mfdb.width * 2)
+    if (!screen_rgb16(wk, packing))
         return 0;
     screen_bytes = (unsigned long)wk->screen.wrap * wk->screen.mfdb.height;
     /* Screen output is staged through the driver, so VRAM need not be mapped. */
@@ -530,15 +610,23 @@ static int screen_area(Virtual *vwk, const GCBITMAP *src, unsigned long src_byte
  * area is read and written once, and nothing outside it.  The sampling
  * phase is that of the whole of dr in every strip.  Without a pool block
  * nothing is drawn.
+ *
+ * With the driver's blend (hook, T_BLEND only), each strip is instead
+ * sampled into the block as PX_ARGB32 rows, twice the bytes of a pixel,
+ * and handed to the driver, which blends it onto the screen.  Should the
+ * driver decline a strip, that strip and the rest go the read-back way;
+ * they fit, at half the size.  A block too small for 16 such pixels is
+ * read back from the start.
  */
 static void screen_strips(Virtual *vwk, const GCBITMAP *src, const RECT16 *sr,
                           const RECT16 *dr, const RECT16 *area, const Packing *packing,
-                          const unsigned short *index_palette, const unsigned long *wprime)
+                          const unsigned short *index_palette, const unsigned long *wprime,
+                          BlendHook hook)
 {
     RECT16 strip;
     MFDB block, screen;
     char *buffer;
-    long capacity, x, y;
+    long capacity, unit, x, y;
 
     buffer = allocate_block(32);
     if (!buffer)
@@ -549,12 +637,15 @@ static void screen_strips(Virtual *vwk, const GCBITMAP *src, const RECT16 *sr,
         free_block(buffer);
         return;
     }
+    if (capacity < 64)
+        hook = 0;
+    unit = hook ? 2 : 1;                    /* bytes a pixel takes in the block, over 2 */
     memset(&screen, 0, sizeof(screen));     /* address 0: the screen */
     for (x = area->x1; x <= area->x2; x = (long)strip.x2 + 1)
     {
-        long width = MIN(area->x2 - x + 1, MIN((capacity / 32) * 16, 32752L));
+        long width = MIN(area->x2 - x + 1, MIN((capacity / (32 * unit)) * 16, 32752L));
         long stride = ((width + 15) & ~15L) * 2;
-        long height = MIN(capacity / stride, 32767L);
+        long height = MIN(capacity / (stride * unit), 32767L);
 
         strip.x1 = x;
         strip.x2 = x + width - 1;
@@ -570,6 +661,14 @@ static void screen_strips(Virtual *vwk, const GCBITMAP *src, const RECT16 *sr,
             strip.y1 = y;
             strip.y2 = MIN(area->y2, y + height - 1);
             block.height = (long)strip.y2 - y + 1;
+            if (hook)
+            {
+                argb_render(src, sr, dr, &strip, (unsigned char *)buffer, stride * 2);
+                if (hook(vwk, (unsigned char *)buffer, stride * 2, strip.x1, strip.y1,
+                         width, block.height, wprime))
+                    continue;
+                hook = 0;
+            }
             if (wprime)
             {
                 /* A memory destination is not clipped: the read is exact. */
@@ -695,7 +794,7 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
                dst->width, &packing, indexed ? index_palette : 0);
         return 1;
     }
-    screen_strips(vwk, src, sr, dr, &draw, &packing, indexed ? index_palette : 0, 0);
+    screen_strips(vwk, src, sr, dr, &draw, &packing, indexed ? index_palette : 0, 0, 0);
     return 1;
 }
 
@@ -718,16 +817,45 @@ int CDECL transfer_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
     return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, 0);
 }
 
+/* The driver's own T_BLEND onto its screen, if it offers one: the answer of
+ * its setup(Q_BLEND_ARGB, 0), asked once and kept for that driver (one
+ * driver at a time; another one is asked when it comes).  -1 or 0 is no
+ * blend.  Built with FVDI_NO_BLEND_HOOK, no driver is asked.
+ */
+static BlendHook blend_hook(const Driver *driver)
+{
+#ifdef FVDI_NO_BLEND_HOOK
+    (void)driver;
+    return 0;
+#else
+    static const Driver *hook_driver;
+    static BlendHook hook_fn;
+    long answer;
+
+    if (driver != hook_driver)
+    {
+        answer = driver->module.setup ? driver->module.setup(Q_BLEND_ARGB, 0) : -1;
+        hook_fn = answer == -1 || answer == 0 ? 0 : (BlendHook)answer;
+        hook_driver = driver;
+    }
+    return hook_fn;
+#endif
+}
+
 /* vr_transfer_bits with an arithmetic mode (64-127, with or without bit 7).
  * Only T_BLEND is drawn: a direct-colour source (alpha 255 unless it is
  * PX_ARGB32 or PX_RGBA32) times the workstation's weight colour, blended in
  * place into memory RGB565/RGB555, either byte order, or onto a 16-bit
  * screen whose layout screen_packing() knows.  A memory destination is not
  * clipped: it must hold all of dr.  On the screen, the part of dr inside
- * the screen and the vs_clip rectangle is read back through the driver's
- * blit, blended and written back (screen_strips()).  Every other mode,
- * format or destination, and every call that is not understood, draws
- * nothing: the older paths would copy regardless of the mode.
+ * the screen and the vs_clip rectangle is drawn.  When the driver offers
+ * its own blend (blend_hook()), it gets the caller's rows for PX_ARGB32 at
+ * 1:1, else strips sampled and converted to PX_ARGB32 in a pool block
+ * (screen_strips()).  Otherwise, or when the driver declines, the part is
+ * read back through the driver's blit, blended and written back.  Every
+ * other mode, format or destination, and every call that is not
+ * understood, draws nothing: the older paths would copy regardless of the
+ * mode.
  */
 void CDECL transfer_blend(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
                           const RECT16 *sr, const RECT16 *dr, long mode)
@@ -755,14 +883,32 @@ void CDECL transfer_blend(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
     wprime[2] = blend_wprime(weight[2]);
     if (!dst)
     {
-        if (wk->screen.mfdb.bitplanes != 16 || !screen_area(vwk, src, src_bytes, &packing, &area))
+        BlendHook hook;
+
+        if (!screen_area(vwk, src, src_bytes, &packing, &area))
             return;
         area.x1 = MAX(area.x1, dr->x1);
         area.y1 = MAX(area.y1, dr->y1);
         area.x2 = MIN(area.x2, dr->x2);
         area.y2 = MIN(area.y2, dr->y2);
-        if (area.x1 <= area.x2 && area.y1 <= area.y2)
-            screen_strips(vwk, src, sr, dr, &area, &packing, 0, wprime);
+        if (area.x1 > area.x2 || area.y1 > area.y2)
+            return;
+        hook = blend_hook(wk->driver);
+        if (hook && src->px_format == PX_ARGB32 &&
+            (long)sr->x2 - sr->x1 == (long)dr->x2 - dr->x1 &&
+            (long)sr->y2 - sr->y1 == (long)dr->y2 - dr->y1)
+        {
+            /* At 1:1 the rows are the caller's, from the source pixel of area's corner */
+            const unsigned char *rows = src->addr +
+                ((long)sr->y1 - src->ymin + area.y1 - dr->y1) * src->width +
+                ((long)sr->x1 - src->xmin + area.x1 - dr->x1) * 4;
+
+            if (hook(vwk, rows, src->width, area.x1, area.y1,
+                     (long)area.x2 - area.x1 + 1, (long)area.y2 - area.y1 + 1, wprime))
+                return;
+            hook = 0;
+        }
+        screen_strips(vwk, src, sr, dr, &area, &packing, 0, wprime, hook);
         return;
     }
     if (dst->bits != 16 || !memory_packing(dst->px_format, &packing))
@@ -777,15 +923,20 @@ void CDECL transfer_blend(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
                  dst->width, &packing, wprime);
 }
 
-/* Whether T_BLEND draws on the screen of wk: 16 bits in a layout the engine
- * knows.  Bit 3 of vq_extnd's work_out[30].
+/* Bit 3 of vq_extnd's work_out[30]: T_BLEND draws on the screen of vwk
+ * (screen_rgb16(), the drawing's own test) and vq_px_format names its
+ * layout, RGB565 or RGB555.  The 5-5-5 layouts with a gap blend as well,
+ * but vq_px_format has no name for them, so they are not advertised.
  */
-int transfer_blend_ok(Workstation *wk)
+int transfer_blend_ok(Virtual *vwk)
 {
     Packing packing;
+    unsigned long format;
 
-    return wk->screen.mfdb.bitplanes == 16 && wk->driver &&
-           screen_packing(wk->driver->device, &packing);
+    if (!screen_rgb16(vwk->real_address, &packing))
+        return 0;
+    format = ctab_pixel_format(vwk);
+    return format == RGB565 || format == RGB555;
 }
 
 /* The table quantizes RGB8 at the requested 3-5 bit resolution per channel.

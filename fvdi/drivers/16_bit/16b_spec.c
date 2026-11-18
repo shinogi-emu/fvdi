@@ -423,6 +423,12 @@ long CDECL setup(long type, long value)
     case S_DRVOPTION:
         ret = tokenize((char *) value);
         break;
+    case Q_BLEND_ARGB:
+        /* T_BLEND onto this screen (16b_blend.c), for the engine only:
+         * fVDI's cookie reaches this too, but it is not a call for programs.
+         */
+        ret = (long) c_blend_argb;
+        break;
     }
 
     return ret;

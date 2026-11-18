@@ -35,6 +35,7 @@
 #define S_AESBUF	102
 #define S_CACHEIMG	103
 #define S_DOBLIT	104
+#define Q_BLEND_ARGB	105	/* a driver's T_BLEND onto its screen (BlendHook, blend.h); for the engine */
 
 #define MODULE_IF_VER   0x0020
 

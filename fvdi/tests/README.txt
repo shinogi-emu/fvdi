@@ -15,8 +15,10 @@ alpha.c checks T_BLEND against alpha_vectors.h, the reference vectors
 shared with EmuTOS's VDI (written by Shinogi's tests/vdi-nvdi generator,
 committed byte for byte; do not edit), in memory and on the fake screen of
 transfer.c, whose blit serves T_BLEND's read-backs and checks that each is
-written back as the same rectangle. "check" also fails on a plain int in
-include/blend.h, which the 16-bit-int drivers include.
+written back as the same rectangle, and the 16-bit driver's own blend
+(../drivers/16_bit/16b_blend.c) against that path and the vectors, with
+the engine's choice between them. "check" also fails on a plain int in
+include/blend.h or 16b_blend.c, which the drivers build with 16-bit ints.
 
 REFCHECK.PRG runs these references with the m68k data model, with serial
 progress/assertions. RASTER.PRG tests real VDI traps in a disposable boot:
