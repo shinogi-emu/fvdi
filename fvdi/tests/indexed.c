@@ -93,6 +93,12 @@ void __wrap_free(void *p)
     __real_free(p);
 }
 
+/* Blocks allocated and not yet freed, for the checks in other files. */
+long raster_allocations(void)
+{
+    return allocations;
+}
+
 static void palette(COLOR_TAB *p, int count)
 {
     int i;

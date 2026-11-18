@@ -189,9 +189,10 @@ static unsigned short vdi_to_rgb16(short value)
  *   vs_min_color, vs_max_color and vs_weight_color (opcode 207,
  *   sub-functions 0 to 3) and their vq_ counterparts (209).  In NVDI they
  *   parameterise vr_transfer_bits' arithmetic modes (highlight, add,
- *   subtract, blend), which fVDI does not implement yet, so for now they
- *   are held and reported back - before, the set calls claimed success and
- *   kept nothing, and the queries always answered black.
+ *   subtract, blend).  fVDI implements T_BLEND, which takes the weight
+ *   through x_weight(); the other three are held and reported back only -
+ *   before, the set calls claimed success and kept nothing, and the
+ *   queries always answered black.
  * - The raster foreground and background colours: vsr_fg_color,
  *   vsr_bg_color and their queries (200-203, sub-function 4).  These hold
  *   palette indices like the text, fill, line and marker ones in Virtual.
@@ -264,6 +265,20 @@ void x_colours_close(Virtual *vwk)
         } else
             link = &node->next;
     }
+}
+
+
+/* The weight colour (vs_weight_color) for T_BLEND, 0-65535 for red, green
+ * and blue: what the workstation set, else the default even blend.
+ */
+void x_weight(Virtual *vwk, unsigned short w[3])
+{
+    XColours *node = x_colours_find(vwk, 0);
+    const COLOR_RGB *rgb = node ? &node->colour[3].rgb : &x_default[3];
+
+    w[0] = rgb->red;
+    w[1] = rgb->green;
+    w[2] = rgb->blue;
 }
 
 

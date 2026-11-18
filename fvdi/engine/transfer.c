@@ -4,8 +4,9 @@
  * Please see LICENSE.TXT for further information.
  *
  * Independent implementation of the documented NVDI 5 raster interface.
- * RGB32/RGB16/indexed sources to RGB16/indexed destinations, including native
- * screens. Do not advertise complete new-raster support: other pairs are absent.
+ * RGB32/ARGB32/RGBA32/RGB16/indexed sources to RGB16/indexed destinations,
+ * including native screens, and T_BLEND of direct sources into RGB16 memory.
+ * Do not advertise complete new-raster support: other pairs are absent.
  */
 
 #include <stdint.h>
@@ -15,6 +16,7 @@
 #include "utility.h"
 #include "itable.h"
 #include "ctab.h"
+#include "blend.h"
 
 #define RGB32       0x03421820UL
 #define RGB565      0x03021010UL
@@ -26,7 +28,8 @@ static int source_size(const GCBITMAP *src)
 {
     unsigned long format = src->px_format & ~REVERSED;
     if (src->px_format == INDEX8) return 1;
-    if (src->px_format == RGB32) return 4;
+    if (src->px_format == RGB32 || src->px_format == PX_ARGB32 ||
+        src->px_format == PX_RGBA32) return 4;
     if (format == RGB565 || format == RGB555) return 2;
     return 0;
 }
@@ -36,10 +39,8 @@ typedef struct {
     unsigned long error, step, remainder, denominator;
 } Axis;
 
-typedef struct {
-    unsigned short red_mask, green_mask;
-    short red_shift, green_shift, reversed;
-} Packing;
+/* The 16-bit layout, shared with the T_BLEND arithmetic of the drivers. */
+typedef BlendPacking Packing;
 
 #if defined(__GNUC__)
 #define PIXEL_INLINE static __inline__ __attribute__((always_inline))
@@ -98,10 +99,12 @@ PIXEL_INLINE unsigned long read_rgb(const unsigned char *p)
 #endif
 }
 
+/* The colour of a direct pixel, 0x..rrggbb: the top byte is not colour. */
 PIXEL_INLINE unsigned long read_direct(const unsigned char *p, unsigned long format)
 {
     unsigned long value, r, g, b;
-    if (format == RGB32) return read_rgb(p);
+    if (format == RGB32 || format == PX_ARGB32) return read_rgb(p);
+    if (format == PX_RGBA32) return read_rgb(p) >> 8;
     value = (format & REVERSED) ? p[1] * 256U + p[0] : p[0] * 256U + p[1];
     b = value & 31;
     if ((format & ~REVERSED) == RGB565)
@@ -138,6 +141,15 @@ PIXEL_INLINE void write_pixel(unsigned char *dst, unsigned short pixel)
 #else
     dst[0] = pixel >> 8;
     dst[1] = pixel;
+#endif
+}
+
+PIXEL_INLINE unsigned short read_pixel(const unsigned char *src)
+{
+#if defined(__m68k__)
+    return *(const unsigned short *)src;
+#else
+    return (unsigned short)((src[0] << 8) | src[1]);
 #endif
 }
 
@@ -356,6 +368,21 @@ static int overlaps(const void *a, unsigned long alen, const void *b, unsigned l
     return aa <= bb ? bb - aa < alen : aa - bb < blen;
 }
 
+/* A memory destination in RGB565 or RGB555, either byte order. */
+static int memory_packing(unsigned long px_format, Packing *p)
+{
+    unsigned long format = px_format & ~REVERSED;
+
+    if (format != RGB565 && format != RGB555)
+        return 0;
+    p->red_mask = format == RGB565 ? 0xf800 : 0x7c00;
+    p->green_mask = format == RGB565 ? 0x07e0 : 0x03e0;
+    p->red_shift = format == RGB565 ? 8 : 9;
+    p->green_shift = format == RGB565 ? 5 : 6;
+    p->reversed = (px_format & REVERSED) != 0;
+    return 1;
+}
+
 static int screen_packing(const Device *dev, Packing *p)
 {
     int i, red_start, green_start;
@@ -438,18 +465,11 @@ static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *ds
 
     if (dst)
     {
-        unsigned long format = dst->px_format & ~REVERSED;
-
         dst_bytes = bitmap_bytes(dst, 2);
-        if (!dst_bytes || (format != RGB565 && format != RGB555) ||
+        if (!dst_bytes || !memory_packing(dst->px_format, &packing) ||
             overlaps(src->addr, src_bytes, dst->addr, dst_bytes) ||
             (void *)dst->addr == wk->screen.mfdb.address || dst->addr == wk->screen.shadow.address)
             return 1;
-        packing.red_mask = format == RGB565 ? 0xf800 : 0x7c00;
-        packing.green_mask = format == RGB565 ? 0x07e0 : 0x03e0;
-        packing.red_shift = format == RGB565 ? 8 : 9;
-        packing.green_shift = format == RGB565 ? 5 : 6;
-        packing.reversed = (dst->px_format & REVERSED) != 0;
         xmin = dst->xmin;
         ymin = dst->ymin;
         xmax = dst->xmax - 1;
@@ -576,6 +596,119 @@ int CDECL transfer_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
     if (src && src->px_format == INDEX8)
         return indexed_to_rgb16(vwk, src, dst, sr, dr, mode);
     return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, 0);
+}
+
+/* T_BLEND: blend the part draw of dr in place, row by row from dst (stride
+ * bytes apart), with the nearest source pixel.  The sampling phase is that of
+ * the whole of dr, as for clipped copies; enlarged rows are not reused,
+ * since each one blends with what it covers.  Alpha 0 pixels are skipped.
+ */
+static void blend_render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr,
+                         const RECT16 *draw, unsigned char *dst, long stride,
+                         const Packing *packing, const unsigned long wprime[3])
+{
+    Packing local_packing = *packing;
+    unsigned long format = src->px_format;
+    unsigned long sw = (long)sr->x2 - sr->x1 + 1;
+    unsigned long sh = (long)sr->y2 - sr->y1 + 1;
+    unsigned long dw = (long)dr->x2 - dr->x1 + 1;
+    unsigned long dh = (long)dr->y2 - dr->y1 + 1;
+    Axis initial_x = axis_start(sw, dw, (long)draw->x1 - dr->x1, 0);
+    Axis y = axis_start(sh, dh, (long)draw->y1 - dr->y1, 0);
+    long count = (long)draw->x2 - draw->x1 + 1;
+    long rows = (long)draw->y2 - draw->y1 + 1;
+    long pixel_bytes = src->bits / 8;
+    const unsigned char *base = src->addr + ((long)sr->y1 - src->ymin) * src->width +
+                                ((long)sr->x1 - src->xmin) * pixel_bytes;
+    unsigned short k[3] = { 0, 0, 0 }, alpha, last_alpha = 256;    /* k of no alpha yet */
+    unsigned long rgb;
+
+    while (rows--)
+    {
+        const unsigned char *row = base + y.pos * src->width;
+        unsigned char *out = dst;
+        Axis x = initial_x;
+        long n = count;
+
+        while (n--)
+        {
+            const unsigned char *p = row + x.pos * pixel_bytes;
+
+            if (format == PX_ARGB32)
+            {
+                rgb = read_rgb(p);
+                alpha = rgb >> 24;
+            } else if (format == PX_RGBA32)
+            {
+                rgb = read_rgb(p);
+                alpha = rgb & 255;
+                rgb >>= 8;
+            } else
+            {
+                rgb = read_direct(p, format);
+                alpha = 255;
+            }
+            if (alpha)
+            {
+                if (alpha != last_alpha)
+                {
+                    last_alpha = alpha;
+                    k[0] = blend_k(alpha, wprime[0]);
+                    k[1] = blend_k(alpha, wprime[1]);
+                    k[2] = blend_k(alpha, wprime[2]);
+                }
+                write_pixel(out, blend_pixel16(read_pixel(out), rgb, k, &local_packing));
+            }
+            out += 2;
+            axis_next(&x);
+        }
+        dst += stride;
+        axis_next(&y);
+    }
+}
+
+/* vr_transfer_bits with an arithmetic mode (64-127, with or without bit 7).
+ * Only T_BLEND is drawn: a direct-colour source (alpha 255 unless it is
+ * PX_ARGB32 or PX_RGBA32) times the workstation's weight colour, blended in
+ * place into memory RGB565/RGB555, either byte order.  A memory destination
+ * is not clipped: it must hold all of dr.  Every other mode, format or
+ * destination, and every call that is not understood, draws nothing: the
+ * older paths would copy regardless of the mode.
+ */
+void CDECL transfer_blend(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+                          const RECT16 *sr, const RECT16 *dr, long mode)
+{
+    Workstation *wk = vwk->real_address;
+    Packing packing;
+    unsigned long src_bytes, dst_bytes, wprime[3];
+    unsigned short weight[3];
+    long size;
+
+    if ((mode & ~128L) != T_BLEND || !src || !sr || !dr)
+        return;
+    size = source_size(src);
+    if (!size || src->px_format == INDEX8 || src->bits != size * 8 ||
+        sr->x2 < sr->x1 || sr->y2 < sr->y1 || dr->x2 < dr->x1 || dr->y2 < dr->y1)
+        return;
+    src_bytes = bitmap_bytes(src, size);
+    if (!src_bytes || sr->x1 < src->xmin || sr->y1 < src->ymin ||
+        sr->x2 >= src->xmax || sr->y2 >= src->ymax)
+        return;
+    /* Screen destinations are not blended yet. */
+    if (!dst || dst->bits != 16 || !memory_packing(dst->px_format, &packing))
+        return;
+    dst_bytes = bitmap_bytes(dst, 2);
+    if (!dst_bytes || overlaps(src->addr, src_bytes, dst->addr, dst_bytes) ||
+        (void *)dst->addr == wk->screen.mfdb.address || dst->addr == wk->screen.shadow.address ||
+        dr->x1 < dst->xmin || dr->y1 < dst->ymin || dr->x2 >= dst->xmax || dr->y2 >= dst->ymax)
+        return;
+    x_weight(vwk, weight);
+    wprime[0] = blend_wprime(weight[0]);
+    wprime[1] = blend_wprime(weight[1]);
+    wprime[2] = blend_wprime(weight[2]);
+    blend_render(src, sr, dr, dr,
+                 dst->addr + ((long)dr->y1 - dst->ymin) * dst->width + ((long)dr->x1 - dst->xmin) * 2,
+                 dst->width, &packing, wprime);
 }
 
 /* The table quantizes RGB8 at the requested 3-5 bit resolution per channel.

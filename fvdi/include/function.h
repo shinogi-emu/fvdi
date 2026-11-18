@@ -86,6 +86,8 @@ int CDECL transfer_rgb16(Virtual *, const GCBITMAP *, GCBITMAP *,
                          const RECT16 *, const RECT16 *, long);
 int CDECL transfer_index8(Virtual *, const GCBITMAP *, GCBITMAP *,
                           const RECT16 *, const RECT16 *, long);
+void CDECL transfer_blend(Virtual *, const GCBITMAP *, GCBITMAP *,
+                          const RECT16 *, const RECT16 *, long);
 void itab_close(Virtual *);
 void ctab_close(Virtual *);
 void CDECL legacy_vro_scale(Virtual *, const void *);
@@ -116,6 +118,7 @@ long CDECL lib_vq_fg_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
 int CDECL lib_vs_x_color(Virtual *vwk, long subfunction, long colour_space, COLOR_ENTRY *values);
 long CDECL lib_vq_x_color(Virtual *vwk, long subfunction, COLOR_ENTRY *colour);
 void x_colours_close(Virtual *vwk);
+void x_weight(Virtual *vwk, unsigned short w[3]);
 void CDECL lib_v_setrgb(Virtual *vwk, long type, short *intin);
 void CDECL lib_vr_clip_rects(Virtual *vwk, long subfunction, short *ptsin, short *ptsout, short *intout, Control *control);
 long CDECL lib_v_bez_qual(Virtual *vwk, long percent);

@@ -17,6 +17,8 @@
 void indexed_tests(void);
 void indexed_screen_blit(Virtual *, const short *, const MFDB *);
 void legacy_tests(void);
+void alpha_tests(void);
+long raster_pool_takes(void);
 void legacy_test_blit(void *, Virtual *, long, void *, void *, void *, void *);
 extern int legacy_test_active;
 
@@ -45,6 +47,7 @@ static union {
 } pool;
 static long pool_capacity = 10240;
 static int pool_busy, pool_unavailable, blits;
+static long pool_takes;
 static int addressless_screen;
 static unsigned char *native_display;
 static Workstation wk;
@@ -67,7 +70,14 @@ char *allocate_block(long size)
     memset(pool.bytes, 0xa5, sizeof(pool.bytes));
     *(long *)(pool.bytes + 16) = pool_capacity;
     pool_busy = 1;
+    pool_takes++;
     return (char *)pool.bytes + 16;
+}
+
+/* Pool blocks handed out so far; a blend into memory must take none. */
+long raster_pool_takes(void)
+{
+    return pool_takes;
 }
 
 void free_block(void *addr)
@@ -459,6 +469,8 @@ int main(void)
     indexed_tests();
     reference_progress("FVDI REFERENCE legacy checks\r\n");
     legacy_tests();
+    reference_progress("FVDI REFERENCE alpha checks\r\n");
+    alpha_tests();
     printf("%lu reference comparisons passed; bounded screen staging (%d blits) and refusal checks passed\n",
            cases + 8, blits);
 #ifdef __m68k__

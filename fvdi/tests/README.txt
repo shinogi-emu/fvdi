@@ -11,6 +11,10 @@ Host checks and guest programs for the raster conversion work described in
 storage, staging, clipping, shadows, small blocks and odd byte storage.
 Allocator wrappers verify balance; LeakSanitizer is disabled for sandbox
 compatibility. Make prints the retained temporary test directory.
+alpha.c checks T_BLEND against alpha_vectors.h, the reference vectors
+shared with EmuTOS's VDI (written by Shinogi's tests/vdi-nvdi generator,
+committed byte for byte; do not edit). "check" also fails on a plain int
+in include/blend.h, which the 16-bit-int drivers include.
 
 REFCHECK.PRG runs these references with the m68k data model, with serial
 progress/assertions. RASTER.PRG tests real VDI traps in a disposable boot:

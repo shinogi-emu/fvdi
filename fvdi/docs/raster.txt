@@ -12,6 +12,9 @@ Supported subset
 vr_transfer_bits source
     Memory xRGB32 (PX_PREF32), RGB565 (PX_MATRIX16), RGB555 (PX_PREF15),
     or byte-indexed PX_PREF8. RGB16 includes reversed byte order.
+    PX_ARGB32 (0x03122020, bytes A, R, G, B: the long 0xAARRGGBB) and
+    PX_RGBA32 (0x03022020, bytes R, G, B, A) carry straight alpha; modes
+    0 and 32 take them wherever they take xRGB32, with the alpha ignored.
 
 RGB16 destination
     Memory RGB565/RGB555, including reversed byte order; null destination
@@ -23,6 +26,7 @@ Indexed destination
 
 New transfer modes
     Copy (0), replace (32), with optional error diffusion (128).
+    T_BLEND (64) into memory RGB16 (see "Blending" below).
 
 Colour tables
     Current/default tables and entries, setters, change-sensitive IDs,
@@ -64,11 +68,62 @@ tests cover RGB565 and interleaved 1/2/4/8 planes.
 
 This does NOT advertise complete new-raster/scaling capability bits in
 vq_extnd. Screen sources, arbitrary layouts, 24/32-bit new-transfer
-destinations, arithmetic/colourized/transparent new-transfer modes and full
-NVDI compatibility remain outside this subset. Other pairs retain the old
+destinations, arithmetic modes other than T_BLEND, colourized/transparent
+new-transfer modes and full NVDI compatibility remain outside this subset. Other pairs retain the old
 handler. vr_trnfm remains a layout conversion, not a general true-colour
 scaler. Pixel-format queries return zero for unrecognized component layouts
 instead of falsely reporting xRGB32.
+
+
+Blending (T_BLEND)
+------------------
+
+vr_transfer_bits with mode 64 (bit 7 accepted, without effect on 16 bits)
+mixes a direct-colour source into the destination by the workstation's
+weight colour, times the source alpha. Sources: PX_ARGB32 and PX_RGBA32
+with their alpha, and xRGB32/RGB565/RGB555 as alpha 255 (a constant blend
+by the weight alone). Straight alpha only: the colour is not multiplied
+by the alpha.
+
+Per channel, with the weight Wc (0-65535), the alpha A (0-255), a
+destination field of n bits (5 or 6) holding d and the 8-bit source
+component C, in integers:
+
+    Wc' = Wc + (Wc >> 15)
+    wa  = A + (A >> 7)
+    kc  = (wa * Wc' + 32768) >> 16
+    s   = C >> (8 - n)
+    out = (d * 256 + (s - d) * kc + 128) >> 8
+
+A pixel with A = 0 is neither read nor written. Every other pixel is
+written, with 0 in the bits outside the three fields, also at zero weight:
+this clears bit 15 of RGB555 and bit 5 of the 5-5-5 layout with a gap. At
+A = 255 and full weight the pixel is what mode 32 writes. The arithmetic
+is shared with the drivers in include/blend.h (shorts and longs only, for
+-mshort), and EmuTOS's VDI computes the same pixels; both are checked
+against the same reference vectors (tests/alpha_vectors.h).
+
+The weight is vs_weight_color (opcode 207, sub-function 3), kept per
+workstation; a workstation that has not set it blends with 0x8000 on every
+channel, an even mix. For plain alpha compositing set it to full once:
+
+    COLOR_ENTRY full = { { 0, 0xffff, 0xffff, 0xffff } };
+    vs_weight_color(handle, 0, &full);
+
+The nearest source pixel is sampled, never filtered, with the rational
+stepping of modes 0/32 (sx = (x - dr.x1) * sw / dw). Destinations are
+memory RGB565 or RGB555, either byte order, blended in place; like other
+memory destinations they are not clipped and must hold the whole
+rectangle.
+
+Refused, drawing nothing: the other arithmetic modes (65-127, also
+T_BLEND with T_COLORIZE, 80), indexed and 1-bit sources, PX_REVERSED or
+other variants of the alpha formats, destinations that are not RGB16
+memory (indices, 32-bit, the screen in this version), rectangles outside
+their bitmaps, overlapping source and destination memory, and the bitmap
+checks of the other modes. vr_transfer_bits sends every arithmetic mode to
+this code, so none reaches the older paths, which copy regardless of the
+mode. vq_extnd does not advertise blending yet (work_out[30] stays 4).
 
 
 Bounds, storage and fast paths
@@ -160,7 +215,10 @@ Verification and review
 
 Host ASan/UBSan checks covered 16,472 RGB16 cases, 1,442 indexed image
 cases and 2,560 legacy combinations, plus refusals, allocation failures,
-lifecycle and complete inverse grids. Independent references use 64-bit
+lifecycle and complete inverse grids. T_BLEND is checked against the
+shared alpha vectors: kc for every alpha and weight, 4,096 pixels in every
+16-bit layout and both byte orders, 41 images into memory and the
+refusals, through vr_transfer_bits as well. Independent references use 64-bit
 coordinates/weighted sums, brute-force palette searches and two wide
 diffusion rows. The same references also pass on a 68060.
 

@@ -108,6 +108,15 @@ void CDECL vr_transfer_bits(Virtual *vwk, GCBITMAP *src_bm, GCBITMAP *dst_bm, RE
 
     if (!src_rect || !dst_rect)
         return;
+    /* Arithmetic modes, with or without dithering: only T_BLEND is drawn,
+     * the rest refused.  None may reach the paths below, which copy
+     * regardless of the mode.
+     */
+    if ((mode & ~128L) >= 64 && (mode & ~128L) < 128)
+    {
+        transfer_blend(vwk, src_bm, dst_bm, src_rect, dst_rect, mode);
+        return;
+    }
     if (transfer_rgb16(vwk, src_bm, dst_bm, src_rect, dst_rect, mode))
         return;
     if (transfer_index8(vwk, src_bm, dst_bm, src_rect, dst_rect, mode))
