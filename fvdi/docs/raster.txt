@@ -85,7 +85,9 @@ mixes a direct-colour source into the destination by the workstation's
 weight colour, times the source alpha. Sources: PX_ARGB32 and PX_RGBA32
 with their alpha, and xRGB32/RGB565/RGB555 as alpha 255 (a constant blend
 by the weight alone). Straight alpha only: the colour is not multiplied
-by the alpha.
+by the alpha. EmuTOS's VDI (and the kernel's copy of it) also blends
+packed 24-bit direct sources, as alpha 255; fVDI refuses them (source_size
+has no 24-bit layout), though both set bit 3.
 
 Per channel, with the weight Wc (0-65535), the alpha A (0-255), a
 destination field of n bits (5 or 6) holding d and the 8-bit source
