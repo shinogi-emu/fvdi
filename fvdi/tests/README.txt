@@ -26,6 +26,17 @@ areas and releases resources on exit. Legacy buffers have allocation guards.
 GEMDOS allocation probes after planar phases catch corruption invisible in
 pixel comparisons.
 
+ALPHA.PRG checks vr_transfer_bits with T_BLEND through the VDI trap
+against the same alpha_vectors.h: the vectors' transfers from ARGB and RGBA
+into memory in the screen's format, onto the screen with clipping and into
+a v_open_bm bitmap, the weight colour of each workstation, modes 0 and 32
+of the two formats, and the refusals; then it times a 48x48 icon against
+the mask path ("ALPHA TIME" lines). It runs under the AES, in any VDI.
+Where bit 3 of work_out[30] is clear (8 planes or fewer, or a VDI without
+the blend) only the refusals run and it ends SKIPPED. Validate with
+check-alpha-log GUEST_LOG=...; add ALPHA_EXPECT=PASS where the blend must
+be there.
+
 
 Disposable installation
 -----------------------

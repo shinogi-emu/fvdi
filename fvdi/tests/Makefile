@@ -47,6 +47,7 @@ guest:
 	$(GUEST_CC) $(GUEST_CFLAGS) dither_guest.c -lgem -o $(TEST_BUILD)/DITHER.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) bezier_guest.c -lgem -o $(TEST_BUILD)/BEZIER.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) aatext_guest.c -lgem -o $(TEST_BUILD)/AATEXT.PRG
+	$(GUEST_CC) $(GUEST_CFLAGS) alpha_guest.c -lgem -o $(TEST_BUILD)/ALPHA.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) twice_guest.c -o $(TEST_BUILD)/TWICE.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) fontbusy_guest.c -lgem -o $(TEST_BUILD)/FONTBUSY.PRG
 	$(GUEST_CC) $(GUEST_CFLAGS) ftcmode_guest.c -o $(TEST_BUILD)/FTCMODE.PRG
@@ -250,3 +251,14 @@ check-aatext-log:
 	test -n "$(GUEST_LOG)"
 	! grep -Eq 'FVDI AATEXT FAIL|Panic' "$(GUEST_LOG)"
 	grep -Fq 'FVDI AATEXT GUEST PASS' "$(GUEST_LOG)"
+
+# ALPHA.PRG: vr_transfer_bits with T_BLEND (64), ARGB and RGBA images with
+# straight alpha blended onto 16-bit pixels, against alpha_vectors.h.  Where
+# bit 3 of work_out[30] is clear only the refusals run and it ends SKIPPED.
+# ALPHA_EXPECT=PASS (or SKIPPED) asks for that ending only.
+.PHONY: check-alpha-log
+check-alpha-log:
+	test -n "$(GUEST_LOG)"
+	! grep -aEq 'ALPHA FAIL|Panic' "$(GUEST_LOG)"
+	grep -aEq 'FVDI ALPHA GUEST (PASS|SKIPPED)' "$(GUEST_LOG)"
+	if test -n "$(ALPHA_EXPECT)"; then grep -aFq 'FVDI ALPHA GUEST $(ALPHA_EXPECT)' "$(GUEST_LOG)"; fi
