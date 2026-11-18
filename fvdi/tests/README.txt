@@ -34,8 +34,9 @@ into memory in the screen's format, onto the screen with clipping and into
 a v_open_bm bitmap, the weight colour of each workstation, modes 0 and 32
 of the two formats, and the refusals; then it times a 48x48 icon against
 the mask path ("ALPHA TIME" lines). It runs under the AES, in any VDI.
-Where bit 3 of work_out[30] is clear (8 planes or fewer, or a VDI without
-the blend) only the refusals run and it ends SKIPPED. Validate with
+Where bit 3 of work_out[30] is clear (8 planes or fewer, 24 or 32 bits,
+or a VDI without the blend) only the refusals run, T_BLEND onto the
+screen among them, and it ends SKIPPED. Validate with
 check-alpha-log GUEST_LOG=...; add ALPHA_EXPECT=PASS where the blend must
 be there.
 

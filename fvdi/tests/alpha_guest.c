@@ -30,7 +30,11 @@
  * (f) refusals: every one of the vectors the screen has a destination for,
  *     a source rectangle outside the source, and overlapping memory: the
  *     destination memory with 64 bytes on each side, the source and an
- *     area of the screen stay as they were.
+ *     area of the screen stay as they were.  First a pattern put in that
+ *     area must read back, so that the comparisons see the screen.  The
+ *     refusal onto "planes" runs wherever bit 3 is clear (except on a
+ *     16-bit layout vq_px_format has no name for, which may blend without
+ *     being advertised): T_BLEND then draws nothing, on 24 and 32 bits too.
  * (g) a v_open_bm bitmap in the program's memory, in the screen's format,
  *     as the destination: it starts at 0x8000 and blends at half; with full
  *     weight set on its handle (the screen workstation's own unchanged)
@@ -91,6 +95,7 @@ static long checks;
 static short screen, planes, xres, yres;
 static unsigned long fmt;           /* the screen's pixel format */
 static int is555, swapped;          /* a 555 screen; the two bytes of a pixel swapped */
+static int advertised;              /* bit 3 of work_out[30] */
 
 static void say(const char *text)
 {
@@ -567,7 +572,7 @@ static void test_memory(void)
 #define SCW (IW + 2 * BD)
 #define SCH (IH + 2 * BD)
 #define SCWW 3                      /* words a line of a plane in the MFDBs: 48 pixels */
-#define SCBUF (SCWW * 2 * 16 * SCH)
+#define SCBUF (SCWW * 2 * 32 * SCH)     /* room for 32 planes (the refusals run on any screen) */
 
 static unsigned char scene[SCBUF] __attribute__((aligned(2))), before[SCBUF] __attribute__((aligned(2))),
                      after[SCBUF] __attribute__((aligned(2)));
@@ -753,20 +758,21 @@ static int icon2x(int bg)
 typedef struct {
     const char *what;
     int edge;                       /* 0: at (OX, OY) with the clip cr; 1-4: cut by the left, right, top, bottom screen edge, no clip */
+    int draws;                      /* whether anything is blended: not with the clip beside the destination */
     short cr[4];
 } ClipCase;
 
 static const ClipCase clip_cases[10] = {
-    { "clipped at the left", 0, { 9, 0, IW - 1, IH - 1 } },
-    { "clipped at the right", 0, { 0, 0, 21, IH - 1 } },
-    { "clipped at the top", 0, { 0, 7, IW - 1, IH - 1 } },
-    { "clipped at the bottom", 0, { 0, 0, IW - 1, 15 } },
-    { "clipped on all four sides", 0, { 7, 5, 24, 18 } },
-    { "with a clipping rectangle beside it", 0, { IW + 1, 0, IW + 13, IH - 1 } },
-    { "cut by the left screen edge", 1, { 0, 0, 0, 0 } },
-    { "cut by the right screen edge", 2, { 0, 0, 0, 0 } },
-    { "cut by the top screen edge", 3, { 0, 0, 0, 0 } },
-    { "cut by the bottom screen edge", 4, { 0, 0, 0, 0 } },
+    { "clipped at the left", 0, 1, { 9, 0, IW - 1, IH - 1 } },
+    { "clipped at the right", 0, 1, { 0, 0, 21, IH - 1 } },
+    { "clipped at the top", 0, 1, { 0, 7, IW - 1, IH - 1 } },
+    { "clipped at the bottom", 0, 1, { 0, 0, IW - 1, 15 } },
+    { "clipped on all four sides", 0, 1, { 7, 5, 24, 18 } },
+    { "with a clipping rectangle beside it", 0, 0, { IW + 1, 0, IW + 13, IH - 1 } },
+    { "cut by the left screen edge", 1, 1, { 0, 0, 0, 0 } },
+    { "cut by the right screen edge", 2, 1, { 0, 0, 0, 0 } },
+    { "cut by the top screen edge", 3, 1, { 0, 0, 0, 0 } },
+    { "cut by the bottom screen edge", 4, 1, { 0, 0, 0, 0 } },
 };
 
 static void screen_clips(void)
@@ -776,6 +782,7 @@ static void screen_clips(void)
     short sr[4], dr[4];
     char text[240];
     int bg, c, i, x, y, ox, oy, kind, bad, under0, drawn, outside, put;
+    unsigned long crc;
     Vis v;
 
     set_weight(screen, alpha_weight[0]);
@@ -788,7 +795,10 @@ static void screen_clips(void)
             break;
         }
         e = &alpha_xfer[i];
-        draw_mem(screen, e, K_ARGB, ALPHA_T_BLEND, ref, &outside);
+        crc = draw_mem(screen, e, K_ARGB, ALPHA_T_BLEND, ref, &outside);
+        snprintf(text, sizeof(text), "(c) the icon at 2x on bg %d in memory, the reference of the clipped draws (crc %08lx want %08lx)",
+                 bg, crc, want_crc(e));
+        report(crc == want_crc(e) && outside, text);
         kind = (bg & 1) ? K_RGBA : K_ARGB;
         for (c = 0; c < 10; c++)
         {
@@ -831,7 +841,7 @@ static void screen_clips(void)
                 }
             snprintf(text, sizeof(text), "(c) the icon at 2x %s, bg %d, from %s: %d pixels differ, %d under alpha 0 changed (%d blended)%s",
                      k->what, bg, kind_name[kind], bad, under0, drawn, put ? "" : ", the background did not arrive");
-            report(put && bad == 0 && under0 == 0 && (drawn > 0) == (c != 5), text);
+            report(put && bad == 0 && under0 == 0 && (drawn > 0) == k->draws, text);
         }
     }
     set_weight(screen, base_weight);
@@ -928,7 +938,7 @@ static void test_copy_modes(void)
 {
     static const short modes[2] = { 0, 32 };
     char name[100], text[240];
-    int i, k, m, outside, ok;
+    int i, k, m, x, y, drawn, outside, ok;
 
     for (i = 0; i < ALPHA_NXFER; i++)
     {
@@ -939,6 +949,16 @@ static void test_copy_modes(void)
         xfer_name(i, name, sizeof(name));
         draw_mem(screen, e, K_XRGB, 0, ref, &outside);
         ok = outside;
+        for (drawn = 0, y = 0; y < IH; y++)
+            for (x = 0; x < IW; x++)
+                if (ref[y][x] != bgpix(e->bg, x, y))
+                    drawn++;
+        if (!drawn)
+        {
+            snprintf(text, sizeof(text), "ALPHA   %s: mode 0 of the xRGB32 image draws nothing", name);
+            say(text);
+            ok = 0;
+        }
         for (k = K_ARGB; k <= K_RGBA; k++)
             for (m = 0; m < 2; m++)
             {
@@ -1014,7 +1034,8 @@ static void mk_fsrc(GCBITMAP *b, unsigned long px)
 static void refused(const char *what, const GCBITMAP *src, const GCBITMAP *dst, const short *sr, const short *dr, short mode)
 {
     char text[240];
-    int same_mem, same_src, same_scr;
+    int same_mem, same_src, same_scr, grabbed;
+    long i;
 
     memcpy(fsave, fbuf, MBUF);
     memcpy(ssave, sbuf, SBUF);
@@ -1025,15 +1046,41 @@ static void refused(const char *what, const GCBITMAP *src, const GCBITMAP *dst, 
     same_mem = memcmp(fbuf, fsave, MBUF) == 0;
     same_src = memcmp(sbuf, ssave, SBUF) == 0;
     same_scr = memcmp(before, after, SCBUF) == 0;
-    snprintf(text, sizeof(text), "(f) refused: %s%s%s%s", what, same_mem ? "" : " (memory changed)",
-             same_src ? "" : " (source changed)", same_scr ? "" : " (screen changed)");
-    report(same_mem && same_src && same_scr, text);
+    for (grabbed = 0, i = 0; i < SCBUF && !grabbed; i++)
+        grabbed = before[i] != 0x6b;
+    snprintf(text, sizeof(text), "(f) refused: %s%s%s%s%s", what, same_mem ? "" : " (memory changed)",
+             same_src ? "" : " (source changed)", same_scr ? "" : " (screen changed)",
+             grabbed ? "" : " (the screen grab read nothing)");
+    report(same_mem && same_src && same_scr && grabbed, text);
+}
+
+/*
+ * the refusals compare the screen area at (OX, OY) before and after a call:
+ * a pattern of bytes put there in the screen's own format must read back.
+ * The first 32 pixels of each line are whole words in every format, packed
+ * or with planes: 4 bytes a plane.
+ */
+static int grab_reads_screen(void)
+{
+    long i;
+    int y;
+
+    for (i = 0; i < SCBUF; i++)
+        scene[i] = (unsigned char)(i * 7 + 3);
+    clip_off(screen);
+    scene_copy(OX, OY, scene, 1);
+    grab(OX, OY, before);
+    for (y = 0; y < SCH; y++)
+        if (memcmp(before + y * scene_pitch(), scene + y * scene_pitch(), 4L * planes) != 0)
+            return 0;
+    return 1;
 }
 
 static void test_refusals(void)
 {
     static const char *const dest_name[6] = {
-        "the screen", "memory of 16 bits", "memory of 8-bit indices", "ARGB memory", "xRGB32 memory", "planes"
+        "the screen", "memory of 16 bits", "memory of 8-bit indices", "ARGB memory", "xRGB32 memory",
+        "the screen, bit 3 clear"
     };
     static const short sr[4] = { 0, 0, 15, 11 }, mdr[4] = { 3, 1, 18, 12 };
     short sdr[4], r2[4];
@@ -1045,15 +1092,19 @@ static void test_refusals(void)
     sdr[1] = OY + 1;
     sdr[2] = OX + 18;
     sdr[3] = OY + 12;
+    snprintf(what, sizeof(what), "(f) a pattern put in the screen area of the refusals reads back (%d planes)", planes);
+    report(grab_reads_screen(), what);
     for (i = 0; i < ALPHA_NREFUSAL; i++)
     {
         const AlphaRefusal *r = &alpha_refusal[i];
         int to_screen = r->dest == ALPHA_DEST_SCREEN || r->dest == ALPHA_DEST_PLANES;
 
-        if (r->dest == ALPHA_DEST_PLANES && planes > 8)
+        /* "planes": a screen where T_BLEND is not advertised, where it must draw nothing;
+           a 16-bit layout without a name may blend all the same */
+        if (r->dest == ALPHA_DEST_PLANES && (advertised || (planes == 16 && fmt == 0)))
         {
-            snprintf(what, sizeof(what), "ALPHA refusal %d (format %08lx mode %d onto planes): not on %d planes",
-                     i, r->px_format, r->mode, planes);
+            snprintf(what, sizeof(what), "ALPHA refusal %d (format %08lx mode %d onto the screen, bit 3 clear): not here, %s",
+                     i, r->px_format, r->mode, advertised ? "bit 3 is set" : "a 16-bit layout without a name");
             say(what);
             continue;
         }
@@ -1400,7 +1451,7 @@ int main(void)
     short work_out[57];
     char text[200];
     unsigned long sum;
-    int advertised = 0, usable = 0, flags = 0, i;
+    int usable = 0, flags = 0, i;
 
     say("ALPHA start");
     crc_init();

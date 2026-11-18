@@ -8,7 +8,7 @@ GUEST_CPU ?= 060
 GUEST_CFLAGS ?= -m68$(GUEST_CPU) -O2 -Wall -Wextra -Werror -I../include
 WRAP_ALLOC = -Wl,--wrap=malloc,--wrap=calloc,--wrap=free
 
-.PHONY: check noint guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log check-ctab-log check-dither-log check-bezier-log check-aatext-log
+.PHONY: check noint guest check-guest-log check-planar-log check-bench-log check-fontscan-log check-colors-log check-bitmaps-log check-realext-log check-nvdimisc-log check-outline-log check-nvditext-log check-vdibench-log check-pens-log check-blitedge-log check-outledge-log check-fontbusy-log check-edges-log check-nvdicol-log check-scrninfo-log check-bmrgb-log check-xfer-log check-ctab-log check-dither-log check-bezier-log check-aatext-log check-alpha-log
 check: noint
 	$(CC) $(CFLAGS) -I../drivers/include -fsanitize=address,undefined -fno-omit-frame-pointer \
 		transfer.c indexed.c legacy.c alpha.c ../engine/transfer.c ../engine/itable.c ../engine/ctab.c ../engine/legacy_raster.c ../engine/colour.c ../engine/default.c ../drivers/16_bit/16b_blend.c $(WRAP_ALLOC) -o $(TEST_BUILD)/transfer-test
@@ -257,7 +257,6 @@ check-aatext-log:
 # straight alpha blended onto 16-bit pixels, against alpha_vectors.h.  Where
 # bit 3 of work_out[30] is clear only the refusals run and it ends SKIPPED.
 # ALPHA_EXPECT=PASS (or SKIPPED) asks for that ending only.
-.PHONY: check-alpha-log
 check-alpha-log:
 	test -n "$(GUEST_LOG)"
 	! grep -aEq 'ALPHA FAIL|Panic' "$(GUEST_LOG)"
