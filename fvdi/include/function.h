@@ -88,6 +88,7 @@ int CDECL transfer_index8(Virtual *, const GCBITMAP *, GCBITMAP *,
                           const RECT16 *, const RECT16 *, long);
 void CDECL transfer_blend(Virtual *, const GCBITMAP *, GCBITMAP *,
                           const RECT16 *, const RECT16 *, long);
+int transfer_blend_ok(Workstation *);
 void itab_close(Virtual *);
 void ctab_close(Virtual *);
 void CDECL legacy_vro_scale(Virtual *, const void *);

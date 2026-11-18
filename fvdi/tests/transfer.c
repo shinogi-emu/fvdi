@@ -54,6 +54,12 @@ static Workstation wk;
 static Virtual vwk;
 static Driver driver;
 static Device device;
+/* Reads from the screen into memory (T_BLEND's read-back), writes to the
+ * screen and the pixels read.  A read waits for the write of its rectangle.
+ */
+static long screen_reads, screen_writes, screen_read_pixels;
+static int read_pending;
+static short read_rectangle[4];
 
 void raster_pool(long capacity, int unavailable)
 {
@@ -103,6 +109,49 @@ void lib_vrt_cpyfm(Virtual *v, short mode, short *xy, MFDB *src, MFDB *dst, shor
     abort();
 }
 
+/* A rectangle of the screen (a source MFDB with address 0) into 16-plane
+ * device-format memory, as the driver's blit does it: from the shadow when
+ * there is one, else from the screen.  A memory destination is not
+ * clipped; still, only the part a T_BLEND may draw is to be read.
+ */
+static void read_screen(Virtual *v, const short *xy, const MFDB *s, const MFDB *d)
+{
+    const unsigned char *from = wk.screen.shadow.address ? wk.screen.shadow.address :
+                                wk.screen.mfdb.address ? (unsigned char *)wk.screen.mfdb.address :
+                                native_display;
+    long x, y;
+
+    assert(v == &vwk && s->address == NULL && !read_pending);
+    assert(d->address && d->standard == 0 && d->bitplanes == 16);
+    assert(xy[4] == 0 && xy[5] == 0);
+    assert(xy[6] == xy[2] - xy[0] && xy[7] == xy[3] - xy[1]);
+    assert(xy[6] < d->width && xy[7] < d->height && d->width <= d->wdwidth * 16);
+    assert(xy[0] >= 0 && xy[1] >= 0);
+    assert(xy[2] < wk.screen.mfdb.width && xy[3] < wk.screen.mfdb.height);
+    if (v->clip.on)
+    {
+        assert(xy[0] >= v->clip.rectangle.x1 && xy[1] >= v->clip.rectangle.y1);
+        assert(xy[2] <= v->clip.rectangle.x2 && xy[3] <= v->clip.rectangle.y2);
+    }
+    for (y = 0; y <= xy[7]; y++)
+        for (x = 0; x < (xy[6] + 1) * 2; x++)
+            ((unsigned char *)d->address)[y * d->wdwidth * 32 + x] =
+                from[(xy[1] + y) * wk.screen.wrap + xy[0] * 2 + x];
+    memcpy(read_rectangle, xy, sizeof(read_rectangle));
+    read_pending = 1;
+    screen_reads++;
+    screen_read_pixels += (xy[6] + 1L) * (xy[7] + 1L);
+}
+
+/* The screen reads and writes so far, and the pixels read (NULL: not wanted). */
+void raster_screen_counts(long *reads, long *writes, long *read_pixels)
+{
+    assert(!read_pending);
+    if (reads) *reads = screen_reads;
+    if (writes) *writes = screen_writes;
+    if (read_pixels) *read_pixels = screen_read_pixels;
+}
+
 void lib_vdi_spppp(void *func, Virtual *v, long mode, void *points,
                   void *source, void *dest, void *unused)
 {
@@ -113,6 +162,13 @@ void lib_vdi_spppp(void *func, Virtual *v, long mode, void *points,
     if (legacy_test_active)
     {
         legacy_test_blit(func, v, mode, points, source, dest, unused);
+        blits++;
+        return;
+    }
+    if (dest)
+    {
+        assert(func == lib_vro_cpyfm && mode == 3 && unused == NULL && s);
+        read_screen(v, xy, s, dest);
         blits++;
         return;
     }
@@ -135,6 +191,14 @@ void lib_vdi_spppp(void *func, Virtual *v, long mode, void *points,
         assert(xy[4] >= v->clip.rectangle.x1 && xy[5] >= v->clip.rectangle.y1);
         assert(xy[6] <= v->clip.rectangle.x2 && xy[7] <= v->clip.rectangle.y2);
     }
+    if (read_pending)
+    {
+        /* T_BLEND writes back exactly what it has read */
+        assert(xy[4] == read_rectangle[0] && xy[5] == read_rectangle[1]);
+        assert(xy[6] == read_rectangle[2] && xy[7] == read_rectangle[3]);
+        read_pending = 0;
+    }
+    screen_writes++;
     for (y = 0; y < s->height; y++)
         for (x = 0; x < s->width * 2; x++)
         {
@@ -174,6 +238,21 @@ static void screen_setup(int w, int h, unsigned char *pixels, int green_bits, in
     }
     for (i = 0; i < green_bits; i++)
         device.scrmap.bitnumber.green[i] = green_start + i;
+}
+
+/* The fake screen for alpha.c: w x h 16-bit pixels at pixels, drawn there
+ * also when the screen has no address (addressless); red's five bits from
+ * red_start, green's green_bits right below them.  Clipping, the shadow,
+ * the line length and the device's description can be changed through the
+ * workstation returned.
+ */
+Virtual *raster_screen(int w, int h, unsigned char *pixels, int green_bits, int red_start,
+                       int addressless)
+{
+    addressless_screen = addressless;
+    screen_setup(w, h, pixels, green_bits, red_start);
+    addressless_screen = 0;
+    return &vwk;
 }
 
 static GCBITMAP bitmap(unsigned char *p, int w, int h, int bpp, unsigned long format)

@@ -5,7 +5,8 @@
  *
  * Independent implementation of the documented NVDI 5 raster interface.
  * RGB32/ARGB32/RGBA32/RGB16/indexed sources to RGB16/indexed destinations,
- * including native screens, and T_BLEND of direct sources into RGB16 memory.
+ * including native screens, and T_BLEND of direct sources into RGB16 memory
+ * and onto RGB16 screens.
  * Do not advertise complete new-raster support: other pairs are absent.
  */
 
@@ -343,261 +344,6 @@ static void render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr,
     }
 }
 
-/* Limit descriptions to the coordinate space RECT16 can address, and check
- * row sizes/products before forming pointers. The caller owns the storage.
- */
-static unsigned long bitmap_bytes(const GCBITMAP *bm, long bytes_per_pixel)
-{
-    long w, h;
-
-    if (!bm->addr || bm->xmin < -32768L || bm->ymin < -32768L ||
-        bm->xmax > 32768L || bm->ymax > 32768L ||
-        bm->xmax <= bm->xmin || bm->ymax <= bm->ymin ||
-        (bytes_per_pixel > 1 && (((unsigned long)bm->addr | bm->width) & 1)))
-        return 0;
-    w = bm->xmax - bm->xmin;
-    h = bm->ymax - bm->ymin;
-    if (bm->width < w * bytes_per_pixel || bm->width > 0x7fffffffL / h)
-        return 0;
-    return bm->width * h;
-}
-
-static int overlaps(const void *a, unsigned long alen, const void *b, unsigned long blen)
-{
-    unsigned long aa = (unsigned long)a, bb = (unsigned long)b;
-    return aa <= bb ? bb - aa < alen : aa - bb < blen;
-}
-
-/* A memory destination in RGB565 or RGB555, either byte order. */
-static int memory_packing(unsigned long px_format, Packing *p)
-{
-    unsigned long format = px_format & ~REVERSED;
-
-    if (format != RGB565 && format != RGB555)
-        return 0;
-    p->red_mask = format == RGB565 ? 0xf800 : 0x7c00;
-    p->green_mask = format == RGB565 ? 0x07e0 : 0x03e0;
-    p->red_shift = format == RGB565 ? 8 : 9;
-    p->green_shift = format == RGB565 ? 5 : 6;
-    p->reversed = (px_format & REVERSED) != 0;
-    return 1;
-}
-
-static int screen_packing(const Device *dev, Packing *p)
-{
-    int i, red_start, green_start;
-
-    if (!dev || dev->format != 2 || dev->bits.red != 5 || dev->bits.blue != 5 ||
-        (dev->bits.green != 5 && dev->bits.green != 6))
-        return 0;
-    red_start = dev->scrmap.bitnumber.red[0];
-    green_start = dev->scrmap.bitnumber.green[0];
-    if (!((red_start == 11 && (green_start == 5 || green_start == 6)) ||
-          (red_start == 10 && green_start == 5 && dev->bits.green == 5)))
-        return 0;
-    if (green_start + dev->bits.green > red_start)
-        return 0;
-    for (i = 0; i < 5; i++)
-        if (dev->scrmap.bitnumber.red[i] != red_start + i ||
-            dev->scrmap.bitnumber.blue[i] != i)
-            return 0;
-    for (i = 0; i < dev->bits.green; i++)
-        if (dev->scrmap.bitnumber.green[i] != green_start + i)
-            return 0;
-    p->red_mask = 31U << red_start;
-    p->green_mask = ((1U << dev->bits.green) - 1) << green_start;
-    p->red_shift = 19 - red_start;
-    p->green_shift = 16 - dev->bits.green - green_start;
-    p->reversed = 0;
-    return 1;
-}
-
-/* Return zero only for pairs owned by the older implementation. A refused
- * A supported-source -> 16-bit refusal must not reach its assumed-32-bit path.
- */
-static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
-                                 const RECT16 *sr, const RECT16 *dr, long mode,
-                                 unsigned short *index_palette)
-{
-    Workstation *wk = vwk->real_address;
-    Packing packing;
-    RECT16 draw;
-    unsigned long src_bytes, dst_bytes;
-    long xmin, ymin, xmax, ymax;
-    char *buffer;
-    long capacity, x, y;
-    int indexed;
-    GCBITMAP source;
-
-    if (!src || !source_size(src) ||
-        (dst ? dst->bits != 16 : wk->screen.mfdb.bitplanes != 16))
-        return 0;
-    indexed = src->px_format == INDEX8;
-    /* Dithering has no effect on a destination with more than 256 colours. */
-    mode &= ~128L;
-    if ((mode != 0 && mode != 32) || src->bits != source_size(src) * 8 || !sr || !dr ||
-        sr->x2 < sr->x1 || sr->y2 < sr->y1 || dr->x2 < dr->x1 || dr->y2 < dr->y1)
-        return 1;
-    src_bytes = bitmap_bytes(src, source_size(src));
-    if (!src_bytes || sr->x1 < src->xmin || sr->y1 < src->ymin ||
-        sr->x2 >= src->xmax || sr->y2 >= src->ymax)
-        return 1;
-
-    if (indexed)
-    {
-        if (!src->ctab)
-        {
-            source = *src;
-            source.ctab = (COLOR_TAB *)ctab_for_bitmap(vwk, 8);
-            src = &source;
-        }
-        if (!itab_valid_palette(src->ctab))
-            return 1;
-        if (src->ctab->no_colors < 256)
-            for (y = sr->y1; y <= sr->y2; y++)
-            {
-                const unsigned char *row = src->addr + (y - src->ymin) * src->width;
-                for (x = sr->x1; x <= sr->x2; x++)
-                    if (row[x - src->xmin] >= src->ctab->no_colors)
-                        return 1;
-            }
-    }
-
-    if (dst)
-    {
-        dst_bytes = bitmap_bytes(dst, 2);
-        if (!dst_bytes || !memory_packing(dst->px_format, &packing) ||
-            overlaps(src->addr, src_bytes, dst->addr, dst_bytes) ||
-            (void *)dst->addr == wk->screen.mfdb.address || dst->addr == wk->screen.shadow.address)
-            return 1;
-        xmin = dst->xmin;
-        ymin = dst->ymin;
-        xmax = dst->xmax - 1;
-        ymax = dst->ymax - 1;
-        /* Offscreen callers must supply valid destination coordinates. */
-        if (dr->x1 < xmin || dr->y1 < ymin || dr->x2 > xmax || dr->y2 > ymax)
-            return 1;
-    } else
-    {
-        if (!wk->driver || !screen_packing(wk->driver->device, &packing) ||
-            wk->screen.mfdb.width <= 0 ||
-            wk->screen.mfdb.height <= 0 ||
-            wk->screen.wrap < (long)wk->screen.mfdb.width * 2)
-            return 1;
-        dst_bytes = (unsigned long)wk->screen.wrap * wk->screen.mfdb.height;
-        /* Screen output is staged through the driver, so VRAM need not be mapped. */
-        if ((wk->screen.mfdb.address &&
-             overlaps(src->addr, src_bytes, wk->screen.mfdb.address, dst_bytes)) ||
-            (wk->screen.shadow.address &&
-             overlaps(src->addr, src_bytes, wk->screen.shadow.address, dst_bytes)))
-            return 1;
-        xmin = 0;
-        ymin = 0;
-        xmax = wk->screen.mfdb.width - 1;
-        ymax = wk->screen.mfdb.height - 1;
-        if (vwk->clip.on)
-        {
-            xmin = MAX(xmin, vwk->clip.rectangle.x1);
-            ymin = MAX(ymin, vwk->clip.rectangle.y1);
-            xmax = MIN(xmax, vwk->clip.rectangle.x2);
-            ymax = MIN(ymax, vwk->clip.rectangle.y2);
-        }
-    }
-    xmin = MAX(xmin, dr->x1);
-    ymin = MAX(ymin, dr->y1);
-    xmax = MIN(xmax, dr->x2);
-    ymax = MIN(ymax, dr->y2);
-    if (xmin > xmax || ymin > ymax)
-        return 1;
-    if (indexed)
-        for (x = 0; x < src->ctab->no_colors; x++)
-        {
-            const COLOR_RGB *rgb = &src->ctab->colors[x].rgb;
-            unsigned long value = ((unsigned long)(rgb->red >> 8) << 16) |
-                                  ((unsigned long)(rgb->green >> 8) << 8) | (rgb->blue >> 8);
-            index_palette[x] = pack_rgb(value, &packing);
-        }
-    draw.x1 = xmin;
-    draw.y1 = ymin;
-    draw.x2 = xmax;
-    draw.y2 = ymax;
-    if (dst)
-    {
-        render(src, sr, dr, &draw,
-               dst->addr + (ymin - dst->ymin) * dst->width + (xmin - dst->xmin) * 2,
-               dst->width, &packing, indexed ? index_palette : 0);
-        return 1;
-    }
-
-    /* Borrow one existing pool block. Batch complete rows when they fit;
-     * split wide rows otherwise. No frame-sized allocation or new cache.
-     * The driver blit preserves its screen/shadow-buffer conventions.
-     */
-    buffer = allocate_block(32);
-    if (!buffer)
-        return 1;
-    capacity = *(long *)buffer;
-    if (capacity < 32)
-    {
-        free_block(buffer);
-        return 1;
-    }
-    for (x = xmin; x <= xmax; x = (long)draw.x2 + 1)
-    {
-        MFDB mfdb;
-        long width = MIN(xmax - x + 1, MIN((capacity / 32) * 16, 32752L));
-        long stride = ((width + 15) & ~15L) * 2;
-        long height = MIN(capacity / stride, 32767L);
-
-        draw.x1 = x;
-        draw.x2 = x + width - 1;
-        memset(&mfdb, 0, sizeof(mfdb));
-        mfdb.address = (short *)buffer;
-        mfdb.width = width;
-        mfdb.wdwidth = stride / 32;
-        mfdb.bitplanes = 16;
-        for (y = ymin; y <= ymax; y = (long)draw.y2 + 1)
-        {
-            short coords[8];
-
-            draw.y1 = y;
-            draw.y2 = MIN(ymax, y + height - 1);
-            mfdb.height = (long)draw.y2 - y + 1;
-            render(src, sr, dr, &draw, (unsigned char *)buffer, stride, &packing,
-                   indexed ? index_palette : 0);
-            coords[0] = coords[1] = 0;
-            coords[2] = width - 1;
-            coords[3] = mfdb.height - 1;
-            coords[4] = draw.x1;
-            coords[5] = draw.y1;
-            coords[6] = draw.x2;
-            coords[7] = draw.y2;
-            lib_vdi_spppp(lib_vro_cpyfm, vwk, 3, coords, &mfdb, 0, 0);
-        }
-    }
-    free_block(buffer);
-    return 1;
-}
-
-/* Keep the 512-byte prepacked indexed palette off the direct-colour stack. */
-#ifdef __GNUC__
-__attribute__((noinline))
-#endif
-static int indexed_to_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
-                            const RECT16 *sr, const RECT16 *dr, long mode)
-{
-    unsigned short palette[256];
-    return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, palette);
-}
-
-int CDECL transfer_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
-                         const RECT16 *sr, const RECT16 *dr, long mode)
-{
-    if (src && src->px_format == INDEX8)
-        return indexed_to_rgb16(vwk, src, dst, sr, dr, mode);
-    return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, 0);
-}
-
 /* T_BLEND: blend the part draw of dr in place, row by row from dst (stride
  * bytes apart), with the nearest source pixel.  The sampling phase is that of
  * the whole of dr, as for clipped copies; enlarged rows are not reused,
@@ -667,19 +413,328 @@ static void blend_render(const GCBITMAP *src, const RECT16 *sr, const RECT16 *dr
     }
 }
 
+/* Limit descriptions to the coordinate space RECT16 can address, and check
+ * row sizes/products before forming pointers. The caller owns the storage.
+ */
+static unsigned long bitmap_bytes(const GCBITMAP *bm, long bytes_per_pixel)
+{
+    long w, h;
+
+    if (!bm->addr || bm->xmin < -32768L || bm->ymin < -32768L ||
+        bm->xmax > 32768L || bm->ymax > 32768L ||
+        bm->xmax <= bm->xmin || bm->ymax <= bm->ymin ||
+        (bytes_per_pixel > 1 && (((unsigned long)bm->addr | bm->width) & 1)))
+        return 0;
+    w = bm->xmax - bm->xmin;
+    h = bm->ymax - bm->ymin;
+    if (bm->width < w * bytes_per_pixel || bm->width > 0x7fffffffL / h)
+        return 0;
+    return bm->width * h;
+}
+
+static int overlaps(const void *a, unsigned long alen, const void *b, unsigned long blen)
+{
+    unsigned long aa = (unsigned long)a, bb = (unsigned long)b;
+    return aa <= bb ? bb - aa < alen : aa - bb < blen;
+}
+
+/* A memory destination in RGB565 or RGB555, either byte order. */
+static int memory_packing(unsigned long px_format, Packing *p)
+{
+    unsigned long format = px_format & ~REVERSED;
+
+    if (format != RGB565 && format != RGB555)
+        return 0;
+    p->red_mask = format == RGB565 ? 0xf800 : 0x7c00;
+    p->green_mask = format == RGB565 ? 0x07e0 : 0x03e0;
+    p->red_shift = format == RGB565 ? 8 : 9;
+    p->green_shift = format == RGB565 ? 5 : 6;
+    p->reversed = (px_format & REVERSED) != 0;
+    return 1;
+}
+
+static int screen_packing(const Device *dev, Packing *p)
+{
+    int i, red_start, green_start;
+
+    if (!dev || dev->format != 2 || dev->bits.red != 5 || dev->bits.blue != 5 ||
+        (dev->bits.green != 5 && dev->bits.green != 6))
+        return 0;
+    red_start = dev->scrmap.bitnumber.red[0];
+    green_start = dev->scrmap.bitnumber.green[0];
+    if (!((red_start == 11 && (green_start == 5 || green_start == 6)) ||
+          (red_start == 10 && green_start == 5 && dev->bits.green == 5)))
+        return 0;
+    if (green_start + dev->bits.green > red_start)
+        return 0;
+    for (i = 0; i < 5; i++)
+        if (dev->scrmap.bitnumber.red[i] != red_start + i ||
+            dev->scrmap.bitnumber.blue[i] != i)
+            return 0;
+    for (i = 0; i < dev->bits.green; i++)
+        if (dev->scrmap.bitnumber.green[i] != green_start + i)
+            return 0;
+    p->red_mask = 31U << red_start;
+    p->green_mask = ((1U << dev->bits.green) - 1) << green_start;
+    p->red_shift = 19 - red_start;
+    p->green_shift = 16 - dev->bits.green - green_start;
+    p->reversed = 0;
+    return 1;
+}
+
+/* The screen as an RGB16 destination: its layout, and the part of it that
+ * may be drawn, all of it or, when clipping is on, its cut with the vs_clip
+ * rectangle.  The source must not lie in the screen or its shadow.  Returns
+ * 0 to refuse the call.
+ */
+static int screen_area(Virtual *vwk, const GCBITMAP *src, unsigned long src_bytes,
+                       Packing *packing, RECT16 *area)
+{
+    Workstation *wk = vwk->real_address;
+    unsigned long screen_bytes;
+
+    if (!wk->driver || !screen_packing(wk->driver->device, packing) ||
+        wk->screen.mfdb.width <= 0 ||
+        wk->screen.mfdb.height <= 0 ||
+        wk->screen.wrap < (long)wk->screen.mfdb.width * 2)
+        return 0;
+    screen_bytes = (unsigned long)wk->screen.wrap * wk->screen.mfdb.height;
+    /* Screen output is staged through the driver, so VRAM need not be mapped. */
+    if ((wk->screen.mfdb.address &&
+         overlaps(src->addr, src_bytes, wk->screen.mfdb.address, screen_bytes)) ||
+        (wk->screen.shadow.address &&
+         overlaps(src->addr, src_bytes, wk->screen.shadow.address, screen_bytes)))
+        return 0;
+    area->x1 = 0;
+    area->y1 = 0;
+    area->x2 = wk->screen.mfdb.width - 1;
+    area->y2 = wk->screen.mfdb.height - 1;
+    if (vwk->clip.on)
+    {
+        area->x1 = MAX(area->x1, vwk->clip.rectangle.x1);
+        area->y1 = MAX(area->y1, vwk->clip.rectangle.y1);
+        area->x2 = MIN(area->x2, vwk->clip.rectangle.x2);
+        area->y2 = MIN(area->y2, vwk->clip.rectangle.y2);
+    }
+    return 1;
+}
+
+/* Draw the part area of dr onto the screen through one borrowed pool block.
+ * Batch complete rows when they fit; split wide rows otherwise. No
+ * frame-sized allocation or new cache. The driver blit preserves its
+ * screen/shadow-buffer conventions, and the engine never touches VRAM.
+ *
+ * With wprime (T_BLEND), each strip is first read back from the screen
+ * through the same blit, which reads the shadow when there is one, then
+ * the source is blended into it and the strip written back.  Each pixel of
+ * area is read and written once, and nothing outside it.  The sampling
+ * phase is that of the whole of dr in every strip.  Without a pool block
+ * nothing is drawn.
+ */
+static void screen_strips(Virtual *vwk, const GCBITMAP *src, const RECT16 *sr,
+                          const RECT16 *dr, const RECT16 *area, const Packing *packing,
+                          const unsigned short *index_palette, const unsigned long *wprime)
+{
+    RECT16 strip;
+    MFDB block, screen;
+    char *buffer;
+    long capacity, x, y;
+
+    buffer = allocate_block(32);
+    if (!buffer)
+        return;
+    capacity = *(long *)buffer;
+    if (capacity < 32)
+    {
+        free_block(buffer);
+        return;
+    }
+    memset(&screen, 0, sizeof(screen));     /* address 0: the screen */
+    for (x = area->x1; x <= area->x2; x = (long)strip.x2 + 1)
+    {
+        long width = MIN(area->x2 - x + 1, MIN((capacity / 32) * 16, 32752L));
+        long stride = ((width + 15) & ~15L) * 2;
+        long height = MIN(capacity / stride, 32767L);
+
+        strip.x1 = x;
+        strip.x2 = x + width - 1;
+        memset(&block, 0, sizeof(block));
+        block.address = (short *)buffer;
+        block.width = width;
+        block.wdwidth = stride / 32;
+        block.bitplanes = 16;
+        for (y = area->y1; y <= area->y2; y = (long)strip.y2 + 1)
+        {
+            short coords[8];
+
+            strip.y1 = y;
+            strip.y2 = MIN(area->y2, y + height - 1);
+            block.height = (long)strip.y2 - y + 1;
+            if (wprime)
+            {
+                /* A memory destination is not clipped: the read is exact. */
+                coords[0] = strip.x1;
+                coords[1] = strip.y1;
+                coords[2] = strip.x2;
+                coords[3] = strip.y2;
+                coords[4] = coords[5] = 0;
+                coords[6] = width - 1;
+                coords[7] = block.height - 1;
+                lib_vdi_spppp(lib_vro_cpyfm, vwk, 3, coords, &screen, &block, 0);
+                blend_render(src, sr, dr, &strip, (unsigned char *)buffer, stride, packing, wprime);
+            } else
+                render(src, sr, dr, &strip, (unsigned char *)buffer, stride, packing, index_palette);
+            coords[0] = coords[1] = 0;
+            coords[2] = width - 1;
+            coords[3] = block.height - 1;
+            coords[4] = strip.x1;
+            coords[5] = strip.y1;
+            coords[6] = strip.x2;
+            coords[7] = strip.y2;
+            lib_vdi_spppp(lib_vro_cpyfm, vwk, 3, coords, &block, 0, 0);
+        }
+    }
+    free_block(buffer);
+}
+
+/* Return zero only for pairs owned by the older implementation. A refused
+ * A supported-source -> 16-bit refusal must not reach its assumed-32-bit path.
+ */
+static int transfer_rgb16_common(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+                                 const RECT16 *sr, const RECT16 *dr, long mode,
+                                 unsigned short *index_palette)
+{
+    Workstation *wk = vwk->real_address;
+    Packing packing;
+    RECT16 draw;
+    unsigned long src_bytes, dst_bytes;
+    long xmin, ymin, xmax, ymax;
+    long x, y;
+    int indexed;
+    GCBITMAP source;
+
+    if (!src || !source_size(src) ||
+        (dst ? dst->bits != 16 : wk->screen.mfdb.bitplanes != 16))
+        return 0;
+    indexed = src->px_format == INDEX8;
+    /* Dithering has no effect on a destination with more than 256 colours. */
+    mode &= ~128L;
+    if ((mode != 0 && mode != 32) || src->bits != source_size(src) * 8 || !sr || !dr ||
+        sr->x2 < sr->x1 || sr->y2 < sr->y1 || dr->x2 < dr->x1 || dr->y2 < dr->y1)
+        return 1;
+    src_bytes = bitmap_bytes(src, source_size(src));
+    if (!src_bytes || sr->x1 < src->xmin || sr->y1 < src->ymin ||
+        sr->x2 >= src->xmax || sr->y2 >= src->ymax)
+        return 1;
+
+    if (indexed)
+    {
+        if (!src->ctab)
+        {
+            source = *src;
+            source.ctab = (COLOR_TAB *)ctab_for_bitmap(vwk, 8);
+            src = &source;
+        }
+        if (!itab_valid_palette(src->ctab))
+            return 1;
+        if (src->ctab->no_colors < 256)
+            for (y = sr->y1; y <= sr->y2; y++)
+            {
+                const unsigned char *row = src->addr + (y - src->ymin) * src->width;
+                for (x = sr->x1; x <= sr->x2; x++)
+                    if (row[x - src->xmin] >= src->ctab->no_colors)
+                        return 1;
+            }
+    }
+
+    if (dst)
+    {
+        dst_bytes = bitmap_bytes(dst, 2);
+        if (!dst_bytes || !memory_packing(dst->px_format, &packing) ||
+            overlaps(src->addr, src_bytes, dst->addr, dst_bytes) ||
+            (void *)dst->addr == wk->screen.mfdb.address || dst->addr == wk->screen.shadow.address)
+            return 1;
+        xmin = dst->xmin;
+        ymin = dst->ymin;
+        xmax = dst->xmax - 1;
+        ymax = dst->ymax - 1;
+        /* Offscreen callers must supply valid destination coordinates. */
+        if (dr->x1 < xmin || dr->y1 < ymin || dr->x2 > xmax || dr->y2 > ymax)
+            return 1;
+    } else
+    {
+        if (!screen_area(vwk, src, src_bytes, &packing, &draw))
+            return 1;
+        xmin = draw.x1;
+        ymin = draw.y1;
+        xmax = draw.x2;
+        ymax = draw.y2;
+    }
+    xmin = MAX(xmin, dr->x1);
+    ymin = MAX(ymin, dr->y1);
+    xmax = MIN(xmax, dr->x2);
+    ymax = MIN(ymax, dr->y2);
+    if (xmin > xmax || ymin > ymax)
+        return 1;
+    if (indexed)
+        for (x = 0; x < src->ctab->no_colors; x++)
+        {
+            const COLOR_RGB *rgb = &src->ctab->colors[x].rgb;
+            unsigned long value = ((unsigned long)(rgb->red >> 8) << 16) |
+                                  ((unsigned long)(rgb->green >> 8) << 8) | (rgb->blue >> 8);
+            index_palette[x] = pack_rgb(value, &packing);
+        }
+    draw.x1 = xmin;
+    draw.y1 = ymin;
+    draw.x2 = xmax;
+    draw.y2 = ymax;
+    if (dst)
+    {
+        render(src, sr, dr, &draw,
+               dst->addr + (ymin - dst->ymin) * dst->width + (xmin - dst->xmin) * 2,
+               dst->width, &packing, indexed ? index_palette : 0);
+        return 1;
+    }
+    screen_strips(vwk, src, sr, dr, &draw, &packing, indexed ? index_palette : 0, 0);
+    return 1;
+}
+
+/* Keep the 512-byte prepacked indexed palette off the direct-colour stack. */
+#ifdef __GNUC__
+__attribute__((noinline))
+#endif
+static int indexed_to_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+                            const RECT16 *sr, const RECT16 *dr, long mode)
+{
+    unsigned short palette[256];
+    return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, palette);
+}
+
+int CDECL transfer_rgb16(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
+                         const RECT16 *sr, const RECT16 *dr, long mode)
+{
+    if (src && src->px_format == INDEX8)
+        return indexed_to_rgb16(vwk, src, dst, sr, dr, mode);
+    return transfer_rgb16_common(vwk, src, dst, sr, dr, mode, 0);
+}
+
 /* vr_transfer_bits with an arithmetic mode (64-127, with or without bit 7).
  * Only T_BLEND is drawn: a direct-colour source (alpha 255 unless it is
  * PX_ARGB32 or PX_RGBA32) times the workstation's weight colour, blended in
- * place into memory RGB565/RGB555, either byte order.  A memory destination
- * is not clipped: it must hold all of dr.  Every other mode, format or
- * destination, and every call that is not understood, draws nothing: the
- * older paths would copy regardless of the mode.
+ * place into memory RGB565/RGB555, either byte order, or onto a 16-bit
+ * screen whose layout screen_packing() knows.  A memory destination is not
+ * clipped: it must hold all of dr.  On the screen, the part of dr inside
+ * the screen and the vs_clip rectangle is read back through the driver's
+ * blit, blended and written back (screen_strips()).  Every other mode,
+ * format or destination, and every call that is not understood, draws
+ * nothing: the older paths would copy regardless of the mode.
  */
 void CDECL transfer_blend(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
                           const RECT16 *sr, const RECT16 *dr, long mode)
 {
     Workstation *wk = vwk->real_address;
     Packing packing;
+    RECT16 area;
     unsigned long src_bytes, dst_bytes, wprime[3];
     unsigned short weight[3];
     long size;
@@ -694,21 +749,43 @@ void CDECL transfer_blend(Virtual *vwk, const GCBITMAP *src, GCBITMAP *dst,
     if (!src_bytes || sr->x1 < src->xmin || sr->y1 < src->ymin ||
         sr->x2 >= src->xmax || sr->y2 >= src->ymax)
         return;
-    /* Screen destinations are not blended yet. */
-    if (!dst || dst->bits != 16 || !memory_packing(dst->px_format, &packing))
+    x_weight(vwk, weight);
+    wprime[0] = blend_wprime(weight[0]);
+    wprime[1] = blend_wprime(weight[1]);
+    wprime[2] = blend_wprime(weight[2]);
+    if (!dst)
+    {
+        if (wk->screen.mfdb.bitplanes != 16 || !screen_area(vwk, src, src_bytes, &packing, &area))
+            return;
+        area.x1 = MAX(area.x1, dr->x1);
+        area.y1 = MAX(area.y1, dr->y1);
+        area.x2 = MIN(area.x2, dr->x2);
+        area.y2 = MIN(area.y2, dr->y2);
+        if (area.x1 <= area.x2 && area.y1 <= area.y2)
+            screen_strips(vwk, src, sr, dr, &area, &packing, 0, wprime);
+        return;
+    }
+    if (dst->bits != 16 || !memory_packing(dst->px_format, &packing))
         return;
     dst_bytes = bitmap_bytes(dst, 2);
     if (!dst_bytes || overlaps(src->addr, src_bytes, dst->addr, dst_bytes) ||
         (void *)dst->addr == wk->screen.mfdb.address || dst->addr == wk->screen.shadow.address ||
         dr->x1 < dst->xmin || dr->y1 < dst->ymin || dr->x2 >= dst->xmax || dr->y2 >= dst->ymax)
         return;
-    x_weight(vwk, weight);
-    wprime[0] = blend_wprime(weight[0]);
-    wprime[1] = blend_wprime(weight[1]);
-    wprime[2] = blend_wprime(weight[2]);
     blend_render(src, sr, dr, dr,
                  dst->addr + ((long)dr->y1 - dst->ymin) * dst->width + ((long)dr->x1 - dst->xmin) * 2,
                  dst->width, &packing, wprime);
+}
+
+/* Whether T_BLEND draws on the screen of wk: 16 bits in a layout the engine
+ * knows.  Bit 3 of vq_extnd's work_out[30].
+ */
+int transfer_blend_ok(Workstation *wk)
+{
+    Packing packing;
+
+    return wk->screen.mfdb.bitplanes == 16 && wk->driver &&
+           screen_packing(wk->driver->device, &packing);
 }
 
 /* The table quantizes RGB8 at the requested 3-5 bit resolution per channel.

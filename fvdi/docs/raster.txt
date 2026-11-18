@@ -26,7 +26,8 @@ Indexed destination
 
 New transfer modes
     Copy (0), replace (32), with optional error diffusion (128).
-    T_BLEND (64) into memory RGB16 (see "Blending" below).
+    T_BLEND (64) into memory RGB16 and onto RGB16 screens (see
+    "Blending" below).
 
 Colour tables
     Current/default tables and entries, setters, change-sensitive IDs,
@@ -67,9 +68,10 @@ packed 8/16/24/32 and interleaved 1/2/4/8-bit workstations; real-driver
 tests cover RGB565 and interleaved 1/2/4/8 planes.
 
 This does NOT advertise complete new-raster/scaling capability bits in
-vq_extnd. Screen sources, arbitrary layouts, 24/32-bit new-transfer
-destinations, arithmetic modes other than T_BLEND, colourized/transparent
-new-transfer modes and full NVDI compatibility remain outside this subset. Other pairs retain the old
+vq_extnd (bit 3 of work_out[30] advertises T_BLEND alone). Screen sources,
+arbitrary layouts, 24/32-bit new-transfer destinations, arithmetic modes
+other than T_BLEND, colourized/transparent new-transfer modes and full NVDI
+compatibility remain outside this subset. Other pairs retain the old
 handler. vr_trnfm remains a layout conversion, not a general true-colour
 scaler. Pixel-format queries return zero for unrecognized component layouts
 instead of falsely reporting xRGB32.
@@ -95,13 +97,15 @@ component C, in integers:
     s   = C >> (8 - n)
     out = (d * 256 + (s - d) * kc + 128) >> 8
 
-A pixel with A = 0 is neither read nor written. Every other pixel is
-written, with 0 in the bits outside the three fields, also at zero weight:
-this clears bit 15 of RGB555 and bit 5 of the 5-5-5 layout with a gap. At
-A = 255 and full weight the pixel is what mode 32 writes. The arithmetic
-is shared with the drivers in include/blend.h (shorts and longs only, for
--mshort), and EmuTOS's VDI computes the same pixels; both are checked
-against the same reference vectors (tests/alpha_vectors.h).
+A pixel with A = 0 is left as it is (in memory neither read nor written;
+on the screen written back as it was read, see below). Every other pixel
+is written, with 0 in the bits outside the three fields, also at zero
+weight: this clears bit 15 of RGB555, and in the 5-5-5 layouts with a gap
+the gap bit, bit 5 or bit 10. At A = 255 and full weight the pixel is
+what mode 32 writes. The arithmetic is shared with the drivers in
+include/blend.h (shorts and longs only, for -mshort), and EmuTOS's VDI
+computes the same pixels; both are checked against the same reference
+vectors (tests/alpha_vectors.h).
 
 The weight is vs_weight_color (opcode 207, sub-function 3), kept per
 workstation; a workstation that has not set it blends with 0x8000 on every
@@ -111,19 +115,41 @@ channel, an even mix. For plain alpha compositing set it to full once:
     vs_weight_color(handle, 0, &full);
 
 The nearest source pixel is sampled, never filtered, with the rational
-stepping of modes 0/32 (sx = (x - dr.x1) * sw / dw). Destinations are
-memory RGB565 or RGB555, either byte order, blended in place; like other
-memory destinations they are not clipped and must hold the whole
-rectangle.
+stepping of modes 0/32 (sx = (x - dr.x1) * sw / dw) from the whole
+destination rectangle: clipping does not move the phase. Destinations:
+
+ - memory RGB565 or RGB555, either byte order, blended in place; like
+   other memory destinations they are not clipped and must hold the whole
+   rectangle;
+ - the screen (a null destination) or a bitmap workstation, 16 bits in a
+   layout fVDI knows (565, 555, 5-5-5 with a gap at bit 5 or at bit 10),
+   clipped to the screen and, when clipping is on, to the vs_clip
+   rectangle.
+
+On the screen the engine reads the clipped rectangle back through the
+driver's blit (vro_cpyfm from the screen into a pool block in device
+format; a memory destination is not clipped, so the read is exact),
+blends the source into the block and writes it back with the same blit,
+in strips when the block is smaller than the rectangle. This works with
+any 16-bit driver that blits screen to memory, including drivers with a
+shadow buffer (their blit reads the shadow) and screens whose VRAM is not
+mapped: the engine never touches VRAM itself. Each pixel of the clipped
+rectangle is read and written once per call, nothing outside it is read,
+and without a pool block nothing is drawn.
 
 Refused, drawing nothing: the other arithmetic modes (65-127, also
 T_BLEND with T_COLORIZE, 80), indexed and 1-bit sources, PX_REVERSED or
-other variants of the alpha formats, destinations that are not RGB16
-memory (indices, 32-bit, the screen in this version), rectangles outside
-their bitmaps, overlapping source and destination memory, and the bitmap
-checks of the other modes. vr_transfer_bits sends every arithmetic mode to
-this code, so none reaches the older paths, which copy regardless of the
-mode. vq_extnd does not advertise blending yet (work_out[30] stays 4).
+other variants of the alpha formats, memory destinations that are not
+RGB16 (indices, 32-bit), screens of other depths or layouts (8 planes or
+fewer, 24 or 32 bits), rectangles outside their bitmaps, source memory
+overlapping the destination (the screen and its shadow included), and
+the bitmap checks of the other modes. vr_transfer_bits sends every
+arithmetic mode to this code, so none reaches the older paths, which copy
+regardless of the mode.
+
+Detection: vq_extnd(handle, 1, work_out) sets bit 3 (value 8) of
+work_out[30] when T_BLEND draws on the workstation's screen; otherwise
+work_out[30] is 4 (vr_clip_rects) as before.
 
 
 Bounds, storage and fast paths
@@ -155,7 +181,8 @@ failures precede output, although existing cached tables may remain.
    Dithering uses one 6 * destination_width error row (1,920 bytes at
    width 320).
  - Screen output borrows an existing fVDI pool block and calls the driver
-   blit. RGB16 batches rows/chunks wide rows. Indexed output presents planar
+   blit. RGB16 batches rows/chunks wide rows; T_BLEND first reads each
+   strip back through the same blit. Indexed output presents planar
    rows; its byte row shares the block when possible, otherwise it allocates
    width bytes. Diffusion still requires its error row.
  - Legacy scaling uses one pool block and reuses staged enlargement rows.
@@ -217,8 +244,11 @@ Host ASan/UBSan checks covered 16,472 RGB16 cases, 1,442 indexed image
 cases and 2,560 legacy combinations, plus refusals, allocation failures,
 lifecycle and complete inverse grids. T_BLEND is checked against the
 shared alpha vectors: kc for every alpha and weight, 4,096 pixels in every
-16-bit layout and both byte orders, 41 images into memory and the
-refusals, through vr_transfer_bits as well. Independent references use 64-bit
+16-bit layout and both byte orders, 41 images into memory, every image
+onto 565, 555 and gap-layout screens (with and without a shadow or an
+address, at the screen's edges, through vs_clip and in strips down to 16
+pixels, each read written back as the same rectangle) and the refusals,
+through vr_transfer_bits as well. Independent references use 64-bit
 coordinates/weighted sums, brute-force palette searches and two wide
 diffusion rows. The same references also pass on a 68060.
 
