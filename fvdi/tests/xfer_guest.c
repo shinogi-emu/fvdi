@@ -880,7 +880,8 @@ static void test_refusals(short h)
     dst2.width = line_bytes(SW + 6) - 2;
     refuse("a destination line too short", &src, &dst2, sr, dr, 0);
     refuse("a mode that does not exist", &src, &dst, sr, dr, 7);
-    refuse("a mode that does not exist (64)", &src, &dst, sr, dr, 64);
+    /* 65, not 64: 64 is T_BLEND, which blends direct sources onto 16 bits where it is advertised */
+    refuse("a mode that does not exist (65)", &src, &dst, sr, dr, 65);
     refuse("transparent for a source that is not 1-bit", &src, &dst, sr, dr, 33);
     src2 = src;
     src2.px_format = 0x03421821UL;
